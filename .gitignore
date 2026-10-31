@@ -4,5 +4,5 @@ __pycache__/
 .claude/skills/
 .agents/
 skills-lock.json
-data/
-!data/splits.json
+/data/*
+!/data/splits.json
