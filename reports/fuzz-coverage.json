@@ -1,0 +1,14 @@
+{
+  "total_runs": 100000,
+  "seed": 0,
+  "hits_per_rule": {
+    "schedule_pm_needs_human": 14694,
+    "request_stop_needs_human": 14865,
+    "unknown_blocked": 25874
+  },
+  "by_verdict": {
+    "ALLOW": 44567,
+    "NEEDS_HUMAN": 29559,
+    "BLOCKED": 25874
+  }
+}
