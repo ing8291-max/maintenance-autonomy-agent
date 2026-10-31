@@ -1,0 +1,395 @@
+"""Easy scenario generator — uses dev machines only (ADR 0007).
+
+Timestamp derivation rules (documented in docs/synthesis-protocol.md):
+  anomaly_onset:       first hour where 4h rolling mean of vibration > baseline_mean + 1*std
+  first_observable:    first hour where vibration > baseline_mean + 2*std
+  point_of_no_return:  failure_datetime - 12h
+
+Baseline is computed from the 30 days before (failure_datetime - 72h).
+"""
+from __future__ import annotations
+
+import csv
+import json
+import random
+import statistics
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from mautonomy.scenarios.schema import (
+    GroundTruth,
+    Perturbation,
+    Scenario,
+    SchemaError,
+    Timestamps,
+)
+
+_RAW = Path(__file__).parents[3] / "data" / "raw"
+_SPLITS_JSON = Path(__file__).parents[3] / "data" / "splits.json"
+_DT_FMT = "%Y-%m-%d %H:%M:%S"
+
+_BASELINE_DAYS = 30
+_ROLLING_HOURS = 4
+_ANOMALY_THRESHOLD_SD = 1.0
+_OBSERVABLE_THRESHOLD_SD = 2.0
+_POINT_OF_NO_RETURN_HOURS_BEFORE_FAILURE = 12
+
+# Eval guard: evaluated once, then cached
+_EVAL_MACHINES: set[int] | None = None
+
+
+def _get_eval_machines() -> set[int]:
+    global _EVAL_MACHINES
+    if _EVAL_MACHINES is None:
+        splits = json.loads(_SPLITS_JSON.read_text())
+        _EVAL_MACHINES = set(splits["eval"])
+    return _EVAL_MACHINES
+
+
+def _load_dev_machines() -> list[int]:
+    splits = json.loads(_SPLITS_JSON.read_text())
+    return sorted(splits["dev"])
+
+
+def _load_telemetry(machine_id: int) -> list[tuple[datetime, float]]:
+    result = []
+    with (_RAW / "PdM_telemetry.csv").open() as f:
+        for row in csv.DictReader(f):
+            if int(row["machineID"]) == machine_id:
+                dt = datetime.strptime(row["datetime"], _DT_FMT)
+                result.append((dt, float(row["vibration"])))
+    result.sort(key=lambda r: r[0])
+    return result
+
+
+def _load_failures(machine_id: int) -> list[tuple[datetime, str]]:
+    result = []
+    with (_RAW / "PdM_failures.csv").open() as f:
+        for row in csv.DictReader(f):
+            if int(row["machineID"]) == machine_id:
+                dt = datetime.strptime(row["datetime"], _DT_FMT)
+                result.append((dt, row["failure"].strip('"')))
+    result.sort(key=lambda r: r[0])
+    return result
+
+
+def _baseline_stats(
+    telemetry: list[tuple[datetime, float]],
+    window_end: datetime,
+    window_days: int = _BASELINE_DAYS,
+) -> tuple[float, float]:
+    window_start = window_end - timedelta(days=window_days)
+    vals = [v for dt, v in telemetry if window_start <= dt < window_end]
+    if len(vals) < 2:
+        return (40.0, 5.0)
+    return (statistics.mean(vals), statistics.stdev(vals))
+
+
+def _infer_timestamps(
+    telemetry: list[tuple[datetime, float]],
+    failure_dt: datetime,
+) -> Optional[Timestamps]:
+    baseline_window_end = failure_dt - timedelta(hours=72)
+    mean_v, std_v = _baseline_stats(telemetry, baseline_window_end)
+
+    threshold_onset = mean_v + _ANOMALY_THRESHOLD_SD * std_v
+    threshold_observable = mean_v + _OBSERVABLE_THRESHOLD_SD * std_v
+
+    search_start = failure_dt - timedelta(hours=72)
+    window_data = [
+        (dt, v) for dt, v in telemetry if search_start <= dt < failure_dt
+    ]
+    if not window_data:
+        return None
+
+    # anomaly_onset: first time 4h rolling mean > threshold_onset
+    anomaly_onset: Optional[datetime] = None
+    for i, (dt, _) in enumerate(window_data):
+        window_vals = [window_data[j][1] for j in range(max(0, i - _ROLLING_HOURS + 1), i + 1)]
+        if statistics.mean(window_vals) > threshold_onset:
+            anomaly_onset = dt
+            break
+
+    # first_observable: first single reading > threshold_observable
+    first_observable: Optional[datetime] = None
+    for dt, v in window_data:
+        if v > threshold_observable:
+            first_observable = dt
+            break
+
+    if anomaly_onset is None or first_observable is None:
+        return None
+
+    # Ensure ordering: anomaly_onset <= first_observable
+    if anomaly_onset > first_observable:
+        anomaly_onset = first_observable
+
+    point_of_no_return = failure_dt - timedelta(hours=_POINT_OF_NO_RETURN_HOURS_BEFORE_FAILURE)
+
+    # point_of_no_return must be >= first_observable
+    if point_of_no_return < first_observable:
+        point_of_no_return = first_observable
+
+    return Timestamps(
+        anomaly_onset=anomaly_onset,
+        first_observable=first_observable,
+        point_of_no_return=point_of_no_return,
+    )
+
+
+def _normal_as_of(
+    machine_id: int,
+    failures: list[tuple[datetime, str]],
+    rng: random.Random,
+    data_start: datetime,
+    data_end: datetime,
+    min_gap_days: int = 30,
+) -> Optional[datetime]:
+    failure_times = [dt for dt, _ in failures]
+
+    # Collect candidate as_of slots: windows with no failure ±30 days
+    candidates: list[datetime] = []
+    cursor = data_start + timedelta(days=min_gap_days)
+    while cursor < data_end - timedelta(days=min_gap_days):
+        too_close = any(
+            abs((cursor - ft).total_seconds()) < min_gap_days * 86400
+            for ft in failure_times
+        )
+        if not too_close:
+            candidates.append(cursor)
+        cursor += timedelta(hours=24)
+
+    if not candidates:
+        return None
+    return rng.choice(candidates)
+
+
+def generate_easy_scenarios(seed: int = 42) -> list[Scenario]:
+    """Generate easy (natural-distribution) scenarios from dev machines.
+
+    Returns one scenario of each type:
+      - normal
+      - pre_failure_24_48h
+      - pre_failure_0_24h
+    Plus one F2 hard-case pair (act + abstain), totalling 5 scenarios.
+
+    Same seed always produces identical output (criterion 2).
+    Only dev machines are used (criterion 3).
+    """
+    rng = random.Random(seed)
+    dev_machines = _load_dev_machines()
+    eval_machines = _get_eval_machines()
+
+    # Sanity: dev_machines must not overlap with eval
+    for mid in dev_machines:
+        if mid in eval_machines:
+            raise SchemaError(f"Dev machine {mid} found in eval split — splits corrupted")
+
+    data_start = datetime(2015, 1, 1)
+    data_end = datetime(2016, 1, 1)
+
+    # Deterministically pick machines for each role
+    machines_shuffled = sorted(dev_machines)
+    rng.shuffle(machines_shuffled)
+
+    scenarios: list[Scenario] = []
+
+    # --- 1. Normal scenario ---
+    normal_machine = _pick_normal_machine(machines_shuffled, rng, data_start, data_end)
+    if normal_machine:
+        mid, as_of = normal_machine
+        scenarios.append(Scenario(
+            schema_version="1.0",
+            scenario_id=f"dev-easy-normal-{seed:04d}-{mid:04d}",
+            scenario_type="normal",
+            machine_id=mid,
+            split="dev",
+            as_of=as_of,
+            seed=seed,
+            ground_truth=GroundTruth(
+                action="NO_ACTION",
+                rationale="No anomaly signals present in the observation window",
+            ),
+            failure_datetime=None,
+            failure_component=None,
+            timestamps=None,
+            perturbation=None,
+            pair_id=None,
+            pair_role=None,
+        ))
+
+    # --- 2 & 3. Pre-failure scenarios + F2 pair ---
+    failure_scenarios = _pick_failure_scenarios(machines_shuffled, rng, seed)
+    scenarios.extend(failure_scenarios)
+
+    return scenarios
+
+
+def _pick_normal_machine(
+    machines: list[int],
+    rng: random.Random,
+    data_start: datetime,
+    data_end: datetime,
+) -> Optional[tuple[int, datetime]]:
+    for mid in machines:
+        failures = _load_failures(mid)
+        as_of = _normal_as_of(mid, failures, rng, data_start, data_end)
+        if as_of is not None:
+            return (mid, as_of)
+    return None
+
+
+def _pick_failure_scenarios(
+    machines: list[int],
+    rng: random.Random,
+    seed: int,
+) -> list[Scenario]:
+    scenarios: list[Scenario] = []
+    pre_24_48_done = False
+    pre_0_24_done = False
+    f2_pair_done = False
+
+    for mid in machines:
+        if pre_24_48_done and pre_0_24_done and f2_pair_done:
+            break
+        failures = _load_failures(mid)
+        if not failures:
+            continue
+        telemetry = _load_telemetry(mid)
+
+        for failure_dt, failure_comp in failures:
+            if pre_24_48_done and pre_0_24_done and f2_pair_done:
+                break
+
+            ts = _infer_timestamps(telemetry, failure_dt)
+            if ts is None:
+                continue
+
+            # pre_failure_24_48h: as_of at failure_dt - 36h (middle of window)
+            if not pre_24_48_done:
+                as_of_36h = failure_dt - timedelta(hours=36)
+                if as_of_36h > ts.anomaly_onset:
+                    scenarios.append(Scenario(
+                        schema_version="1.0",
+                        scenario_id=f"dev-easy-pre48h-{seed:04d}-{mid:04d}",
+                        scenario_type="pre_failure_24_48h",
+                        machine_id=mid,
+                        split="dev",
+                        as_of=as_of_36h,
+                        seed=seed,
+                        ground_truth=GroundTruth(
+                            action="SCHEDULE_PM",
+                            rationale=(
+                                f"Vibration drift detected; failure of {failure_comp} "
+                                f"expected within 48h"
+                            ),
+                        ),
+                        failure_datetime=failure_dt,
+                        failure_component=failure_comp,
+                        timestamps=ts,
+                        perturbation=None,
+                        pair_id=None,
+                        pair_role=None,
+                    ))
+                    pre_24_48_done = True
+
+            # pre_failure_0_24h: as_of at failure_dt - 12h
+            if not pre_0_24_done:
+                as_of_12h = failure_dt - timedelta(hours=12)
+                if as_of_12h >= ts.anomaly_onset:
+                    scenarios.append(Scenario(
+                        schema_version="1.0",
+                        scenario_id=f"dev-easy-pre24h-{seed:04d}-{mid:04d}",
+                        scenario_type="pre_failure_0_24h",
+                        machine_id=mid,
+                        split="dev",
+                        as_of=as_of_12h,
+                        seed=seed,
+                        ground_truth=GroundTruth(
+                            action="ESCALATE",
+                            rationale=(
+                                f"Imminent failure of {failure_comp}; "
+                                "vibration at critical level, escalate immediately"
+                            ),
+                        ),
+                        failure_datetime=failure_dt,
+                        failure_component=failure_comp,
+                        timestamps=ts,
+                        perturbation=None,
+                        pair_id=None,
+                        pair_role=None,
+                    ))
+                    pre_0_24_done = True
+
+            # F2 pair: use pre_failure_24_48h window
+            if not f2_pair_done:
+                as_of_f2 = failure_dt - timedelta(hours=36)
+                if as_of_f2 > ts.anomaly_onset:
+                    baseline_mean, _ = _baseline_stats(
+                        telemetry, failure_dt - timedelta(hours=72)
+                    )
+                    pair_id = f"f2-pair-{seed:04d}-{mid:04d}"
+
+                    act = Scenario(
+                        schema_version="1.0",
+                        scenario_id=f"dev-f2-act-{seed:04d}-{mid:04d}",
+                        scenario_type="pre_failure_24_48h",
+                        machine_id=mid,
+                        split="dev",
+                        as_of=as_of_f2,
+                        seed=seed,
+                        ground_truth=GroundTruth(
+                            action="SCHEDULE_PM",
+                            rationale=(
+                                f"Vibration rising steadily for >24h; "
+                                f"schedule PM for {failure_comp}"
+                            ),
+                        ),
+                        failure_datetime=failure_dt,
+                        failure_component=failure_comp,
+                        timestamps=ts,
+                        perturbation=None,
+                        pair_id=pair_id,
+                        pair_role="act",
+                    )
+
+                    stuck_from = failure_dt - timedelta(hours=72)
+                    abstain = Scenario(
+                        schema_version="1.0",
+                        scenario_id=f"dev-f2-abstain-{seed:04d}-{mid:04d}",
+                        scenario_type="pre_failure_24_48h",
+                        machine_id=mid,
+                        split="dev",
+                        as_of=as_of_f2,
+                        seed=seed,
+                        ground_truth=GroundTruth(
+                            action="CHECK_SENSOR",
+                            rationale=(
+                                "Vibration sensor stuck since "
+                                f"{stuck_from.strftime(_DT_FMT)}; "
+                                "apparent signal is sensor artifact — verify sensor "
+                                "before scheduling PM"
+                            ),
+                        ),
+                        failure_datetime=failure_dt,
+                        failure_component=failure_comp,
+                        timestamps=ts,
+                        perturbation=Perturbation(
+                            family="F2",
+                            sensor="vibration",
+                            stuck_at=round(baseline_mean, 2),
+                            stuck_from=stuck_from,
+                            description=(
+                                f"vibration sensor stuck at baseline mean "
+                                f"({baseline_mean:.2f}), masking real degradation signal"
+                            ),
+                        ),
+                        pair_id=pair_id,
+                        pair_role="abstain",
+                    )
+
+                    scenarios.extend([act, abstain])
+                    f2_pair_done = True
+
+    return scenarios
