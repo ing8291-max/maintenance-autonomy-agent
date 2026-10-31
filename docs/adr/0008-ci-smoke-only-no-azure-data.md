@@ -7,7 +7,7 @@ CI(`.github/workflows/ci.yml`)가 돌리는 것:
 2. `tests/fixtures/scenarios/` 에 커밋된 **완전 합성 예시 시나리오** 몇 개로 end-to-end 스모크. 이 시나리오들은 Azure 데이터를 참조하지 않는 자립형이다.
 3. 커밋된 `reports/fuzz-coverage.json` 과 재계산 결과가 일치하는지 비교.
 
-API 키·시크릿은 CI 에 안 넣는다. 스모크 테스트는 로컬 Llama 폴백 모델로 돌리거나 (M3 8GB), VCR 캐시된 응답으로 돌린다 — 단 그 캐시 역시 Azure 데이터 참조가 없는 것만 커밋한다.
+API 키·시크릿은 CI 에 안 넣는다. GitHub Actions 는 Linux 러너이므로 **MLX(맥 전용)로 Llama 를 돌릴 수 없다**. 그래서 CI 스모크는 **정해진 답을 내는 가짜(stub) 모델** 어댑터로 돌린다 (`src/mautonomy/models/stub.py`). 스텁은 시나리오 ID 에 매핑된 고정 응답을 리턴해 하네스의 로지스틱만 검증한다. 실제 모델 비교는 로컬(`make eval`)에서만.
 
 ## Considered Options
 
