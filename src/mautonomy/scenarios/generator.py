@@ -5,7 +5,12 @@ Timestamp derivation rules (documented in docs/synthesis-protocol.md):
   first_observable:    first hour where vibration > baseline_mean + 2*std
   point_of_no_return:  failure_datetime - 12h
 
-Baseline is computed from the 30 days before (failure_datetime - 72h).
+Baseline for pre-failure scenarios is the 30 days before (failure_datetime - 72h).
+
+The F2 pair runs on a *normal* window (no failures within ±7 days of as_of)
+with two injections: a precursor_rise (act → SCHEDULE_PM) and a sensor_stuck
+(abstain → CHECK_SENSOR). Only the perturbation differs. See
+docs/synthesis-protocol.md § F2 patterns.
 """
 from __future__ import annotations
 
@@ -15,7 +20,7 @@ import random
 import statistics
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from mautonomy.scenarios.schema import (
     GroundTruth,
@@ -34,6 +39,14 @@ _ROLLING_HOURS = 4
 _ANOMALY_THRESHOLD_SD = 1.0
 _OBSERVABLE_THRESHOLD_SD = 2.0
 _POINT_OF_NO_RETURN_HOURS_BEFORE_FAILURE = 12
+
+# F2 pair injection parameters (see docs/synthesis-protocol.md § F2 patterns)
+_F2_NORMAL_HALF_WINDOW_DAYS = 7
+_F2_PRECURSOR_DURATION_HOURS = 24
+_F2_PRECURSOR_RISE_SD = 2.0
+_F2_CORRELATED_DELTA_SD = -1.5
+_F2_STUCK_LEAD_HOURS = 18
+_F2_START_LEAD_MAX_HOURS = 48
 
 # Eval guard: evaluated once, then cached
 _EVAL_MACHINES: set[int] | None = None
@@ -61,6 +74,35 @@ def _load_telemetry(machine_id: int) -> list[tuple[datetime, float]]:
                 result.append((dt, float(row["vibration"])))
     result.sort(key=lambda r: r[0])
     return result
+
+
+def _load_telemetry_full(machine_id: int) -> list[dict[str, Any]]:
+    result = []
+    with (_RAW / "PdM_telemetry.csv").open() as f:
+        for row in csv.DictReader(f):
+            if int(row["machineID"]) == machine_id:
+                result.append({
+                    "datetime": datetime.strptime(row["datetime"], _DT_FMT),
+                    "volt": float(row["volt"]),
+                    "rotate": float(row["rotate"]),
+                    "pressure": float(row["pressure"]),
+                    "vibration": float(row["vibration"]),
+                })
+    result.sort(key=lambda r: r["datetime"])
+    return result
+
+
+def _sensor_stats(
+    telemetry: list[dict[str, Any]],
+    sensor: str,
+    window_end: datetime,
+    window_days: int = _BASELINE_DAYS,
+) -> tuple[float, float]:
+    window_start = window_end - timedelta(days=window_days)
+    vals = [r[sensor] for r in telemetry if window_start <= r["datetime"] < window_end]
+    if len(vals) < 2:
+        return (40.0, 5.0) if sensor == "vibration" else (440.0, 55.0)
+    return (statistics.mean(vals), statistics.stdev(vals))
 
 
 def _load_failures(machine_id: int) -> list[tuple[datetime, str]]:
@@ -219,9 +261,14 @@ def generate_easy_scenarios(seed: int = 42) -> list[Scenario]:
             pair_role=None,
         ))
 
-    # --- 2 & 3. Pre-failure scenarios + F2 pair ---
+    # --- 2 & 3. Pre-failure scenarios (no F2 pair here) ---
     failure_scenarios = _pick_failure_scenarios(machines_shuffled, rng, seed)
     scenarios.extend(failure_scenarios)
+
+    # --- 4. F2 pair on a normal window (independent of failure scenarios) ---
+    f2 = _pick_f2_pair(machines_shuffled, rng, seed, data_start, data_end)
+    if f2 is not None:
+        scenarios.extend(f2)
 
     return scenarios
 
@@ -248,10 +295,9 @@ def _pick_failure_scenarios(
     scenarios: list[Scenario] = []
     pre_24_48_done = False
     pre_0_24_done = False
-    f2_pair_done = False
 
     for mid in machines:
-        if pre_24_48_done and pre_0_24_done and f2_pair_done:
+        if pre_24_48_done and pre_0_24_done:
             break
         failures = _load_failures(mid)
         if not failures:
@@ -259,7 +305,7 @@ def _pick_failure_scenarios(
         telemetry = _load_telemetry(mid)
 
         for failure_dt, failure_comp in failures:
-            if pre_24_48_done and pre_0_24_done and f2_pair_done:
+            if pre_24_48_done and pre_0_24_done:
                 break
 
             ts = _infer_timestamps(telemetry, failure_dt)
@@ -322,74 +368,147 @@ def _pick_failure_scenarios(
                     ))
                     pre_0_24_done = True
 
-            # F2 pair: use pre_failure_24_48h window
-            if not f2_pair_done:
-                as_of_f2 = failure_dt - timedelta(hours=36)
-                if as_of_f2 > ts.anomaly_onset:
-                    baseline_mean, _ = _baseline_stats(
-                        telemetry, failure_dt - timedelta(hours=72)
-                    )
-                    pair_id = f"f2-pair-{seed:04d}-{mid:04d}"
-
-                    act = Scenario(
-                        schema_version="1.0",
-                        scenario_id=f"dev-f2-act-{seed:04d}-{mid:04d}",
-                        scenario_type="pre_failure_24_48h",
-                        machine_id=mid,
-                        split="dev",
-                        as_of=as_of_f2,
-                        seed=seed,
-                        ground_truth=GroundTruth(
-                            action="SCHEDULE_PM",
-                            rationale=(
-                                f"Vibration rising steadily for >24h; "
-                                f"schedule PM for {failure_comp}"
-                            ),
-                        ),
-                        failure_datetime=failure_dt,
-                        failure_component=failure_comp,
-                        timestamps=ts,
-                        perturbation=None,
-                        pair_id=pair_id,
-                        pair_role="act",
-                    )
-
-                    stuck_from = failure_dt - timedelta(hours=72)
-                    abstain = Scenario(
-                        schema_version="1.0",
-                        scenario_id=f"dev-f2-abstain-{seed:04d}-{mid:04d}",
-                        scenario_type="pre_failure_24_48h",
-                        machine_id=mid,
-                        split="dev",
-                        as_of=as_of_f2,
-                        seed=seed,
-                        ground_truth=GroundTruth(
-                            action="CHECK_SENSOR",
-                            rationale=(
-                                "Vibration sensor stuck since "
-                                f"{stuck_from.strftime(_DT_FMT)}; "
-                                "apparent signal is sensor artifact — verify sensor "
-                                "before scheduling PM"
-                            ),
-                        ),
-                        failure_datetime=failure_dt,
-                        failure_component=failure_comp,
-                        timestamps=ts,
-                        perturbation=Perturbation(
-                            family="F2",
-                            sensor="vibration",
-                            stuck_at=round(baseline_mean, 2),
-                            stuck_from=stuck_from,
-                            description=(
-                                f"vibration sensor stuck at baseline mean "
-                                f"({baseline_mean:.2f}), masking real degradation signal"
-                            ),
-                        ),
-                        pair_id=pair_id,
-                        pair_role="abstain",
-                    )
-
-                    scenarios.extend([act, abstain])
-                    f2_pair_done = True
-
     return scenarios
+
+
+def _normal_window_as_of(
+    telemetry_times: list[datetime],
+    failures: list[tuple[datetime, str]],
+    rng: random.Random,
+    half_window_days: int = _F2_NORMAL_HALF_WINDOW_DAYS,
+) -> Optional[datetime]:
+    """Return an as_of inside a window with no failure within ±half_window_days.
+
+    The as_of is sampled from telemetry timestamps so stats and injection points
+    land on actual data rows.
+    """
+    if not telemetry_times:
+        return None
+    data_start = telemetry_times[0]
+    data_end = telemetry_times[-1]
+    failure_times = [dt for dt, _ in failures]
+
+    gap = timedelta(days=half_window_days)
+    low = data_start + gap + timedelta(days=_BASELINE_DAYS)
+    high = data_end - gap
+    candidates = [
+        dt for dt in telemetry_times
+        if low <= dt <= high
+        and all(abs((dt - ft).total_seconds()) >= gap.total_seconds() for ft in failure_times)
+    ]
+    if not candidates:
+        return None
+    return rng.choice(candidates)
+
+
+def _pick_f2_pair(
+    machines: list[int],
+    rng: random.Random,
+    seed: int,
+    data_start: datetime,
+    data_end: datetime,
+) -> Optional[list[Scenario]]:
+    """Build the F2 act/abstain pair on a normal window of a dev machine.
+
+    Both members share scenario_type=hardcase, same as_of, same machine. The
+    only causal difference is the perturbation kind:
+      - act:     precursor_rise on vibration with correlated rotate drift →
+                 SCHEDULE_PM
+      - abstain: sensor_stuck on vibration starting a few hours before as_of →
+                 CHECK_SENSOR
+    """
+    for mid in machines:
+        failures = _load_failures(mid)
+        telemetry = _load_telemetry_full(mid)
+        if not telemetry:
+            continue
+        times = [r["datetime"] for r in telemetry]
+        as_of = _normal_window_as_of(times, failures, rng)
+        if as_of is None:
+            continue
+
+        vib_mean, vib_std = _sensor_stats(telemetry, "vibration", as_of)
+        rot_mean, rot_std = _sensor_stats(telemetry, "rotate", as_of)
+        if vib_std <= 0 or rot_std <= 0:
+            continue
+
+        pair_id = f"f2-pair-{seed:04d}-{mid:04d}"
+
+        rise_rate = round(_F2_PRECURSOR_RISE_SD * vib_std / _F2_PRECURSOR_DURATION_HOURS, 3)
+        correlated_delta = round(_F2_CORRELATED_DELTA_SD * rot_std, 2)
+        precursor_start = as_of - timedelta(hours=_F2_PRECURSOR_DURATION_HOURS)
+
+        act = Scenario(
+            schema_version="1.0",
+            scenario_id=f"dev-f2-act-{seed:04d}-{mid:04d}",
+            scenario_type="hardcase",
+            machine_id=mid,
+            split="dev",
+            as_of=as_of,
+            seed=seed,
+            ground_truth=GroundTruth(
+                action="SCHEDULE_PM",
+                rationale=(
+                    "Vibration rising steadily with correlated rotate drift — "
+                    "real precursor, schedule PM"
+                ),
+            ),
+            failure_datetime=None,
+            failure_component=None,
+            timestamps=None,
+            perturbation=Perturbation(
+                family="F2",
+                kind="precursor_rise",
+                sensor="vibration",
+                start_at=precursor_start,
+                description=(
+                    f"vibration rises {rise_rate:.3f}/h for "
+                    f"{_F2_PRECURSOR_DURATION_HOURS}h with rotate drifting by "
+                    f"{correlated_delta:.2f} over the same window"
+                ),
+                rise_rate_per_hour=rise_rate,
+                rise_duration_hours=_F2_PRECURSOR_DURATION_HOURS,
+                correlated_sensor="rotate",
+                correlated_delta=correlated_delta,
+            ),
+            pair_id=pair_id,
+            pair_role="act",
+        )
+
+        stuck_start = as_of - timedelta(hours=_F2_STUCK_LEAD_HOURS)
+        abstain = Scenario(
+            schema_version="1.0",
+            scenario_id=f"dev-f2-abstain-{seed:04d}-{mid:04d}",
+            scenario_type="hardcase",
+            machine_id=mid,
+            split="dev",
+            as_of=as_of,
+            seed=seed,
+            ground_truth=GroundTruth(
+                action="CHECK_SENSOR",
+                rationale=(
+                    f"Vibration sensor frozen since "
+                    f"{stuck_start.strftime(_DT_FMT)} while rotate/pressure "
+                    "stay nominal — verify sensor before scheduling PM"
+                ),
+            ),
+            failure_datetime=None,
+            failure_component=None,
+            timestamps=None,
+            perturbation=Perturbation(
+                family="F2",
+                kind="sensor_stuck",
+                sensor="vibration",
+                start_at=stuck_start,
+                description=(
+                    f"vibration sensor stuck at baseline mean "
+                    f"({vib_mean:.2f}); other signals unchanged"
+                ),
+                stuck_at=round(vib_mean, 2),
+            ),
+            pair_id=pair_id,
+            pair_role="abstain",
+        )
+        return [act, abstain]
+
+    return None

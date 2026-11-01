@@ -223,21 +223,27 @@ def _f2_act_yaml(machine_id: int = 1) -> str:
     return f"""\
         schema_version: "1.0"
         scenario_id: "dev-f2-act-001"
-        scenario_type: pre_failure_24_48h
+        scenario_type: hardcase
         machine_id: {machine_id}
         split: dev
         as_of: "2015-03-04 06:00:00"
         seed: 42
-        failure_datetime: "2015-03-06 06:00:00"
-        failure_component: comp1
-        timestamps:
-          anomaly_onset: "2015-03-03 04:00:00"
-          first_observable: "2015-03-03 06:00:00"
-          point_of_no_return: "2015-03-05 18:00:00"
+        failure_datetime: null
+        failure_component: null
+        timestamps: null
         ground_truth:
           action: SCHEDULE_PM
-          rationale: "Vibration rising steadily, real signal"
-        perturbation: null
+          rationale: "Vibration rising steadily with correlated rotate drift — real precursor"
+        perturbation:
+          family: F2
+          kind: precursor_rise
+          sensor: vibration
+          start_at: "2015-03-03 06:00:00"
+          description: "vibration rises 0.4/h for 24h with rotate drifting by -75"
+          rise_rate_per_hour: 0.4
+          rise_duration_hours: 24
+          correlated_sensor: rotate
+          correlated_delta: -75.0
         pair_id: "f2-pair-001"
         pair_role: act
     """
@@ -247,26 +253,24 @@ def _f2_abstain_yaml(machine_id: int = 1) -> str:
     return f"""\
         schema_version: "1.0"
         scenario_id: "dev-f2-abstain-001"
-        scenario_type: pre_failure_24_48h
+        scenario_type: hardcase
         machine_id: {machine_id}
         split: dev
         as_of: "2015-03-04 06:00:00"
         seed: 42
-        failure_datetime: "2015-03-06 06:00:00"
-        failure_component: comp1
-        timestamps:
-          anomaly_onset: "2015-03-03 04:00:00"
-          first_observable: "2015-03-03 06:00:00"
-          point_of_no_return: "2015-03-05 18:00:00"
+        failure_datetime: null
+        failure_component: null
+        timestamps: null
         ground_truth:
           action: CHECK_SENSOR
           rationale: "Vibration sensor stuck — verify sensor before scheduling PM"
         perturbation:
           family: F2
+          kind: sensor_stuck
           sensor: vibration
+          start_at: "2015-03-03 12:00:00"
+          description: "vibration sensor stuck at baseline mean; other signals unchanged"
           stuck_at: 40.39
-          stuck_from: "2015-03-03 00:00:00"
-          description: "vibration sensor stuck at baseline mean, masking real degradation signal"
         pair_id: "f2-pair-001"
         pair_role: abstain
     """

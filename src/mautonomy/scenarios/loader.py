@@ -61,13 +61,29 @@ def _parse_ground_truth(raw: dict[str, Any]) -> GroundTruth:
     )
 
 
+def _opt_float(raw: dict[str, Any], key: str) -> float | None:
+    v = raw.get(key)
+    return float(v) if v is not None else None
+
+
+def _opt_int(raw: dict[str, Any], key: str) -> int | None:
+    v = raw.get(key)
+    return int(v) if v is not None else None
+
+
 def _parse_perturbation(raw: dict[str, Any]) -> Perturbation:
     return Perturbation(
         family=_require(raw, "family"),
+        kind=_require(raw, "kind"),
         sensor=_require(raw, "sensor"),
-        stuck_at=float(_require(raw, "stuck_at")),
-        stuck_from=_parse_dt(_require(raw, "stuck_from"), "stuck_from"),
+        start_at=_parse_dt(_require(raw, "start_at"), "start_at"),
         description=_require(raw, "description"),
+        rise_rate_per_hour=_opt_float(raw, "rise_rate_per_hour"),
+        rise_duration_hours=_opt_int(raw, "rise_duration_hours"),
+        correlated_sensor=raw.get("correlated_sensor"),
+        correlated_delta=_opt_float(raw, "correlated_delta"),
+        stuck_at=_opt_float(raw, "stuck_at"),
+        spike_delta=_opt_float(raw, "spike_delta"),
     )
 
 
@@ -161,10 +177,16 @@ def _to_dict(sc: Scenario) -> dict[str, Any]:
     if sc.perturbation:
         pert = {
             "family": sc.perturbation.family,
+            "kind": sc.perturbation.kind,
             "sensor": sc.perturbation.sensor,
-            "stuck_at": sc.perturbation.stuck_at,
-            "stuck_from": _dt(sc.perturbation.stuck_from),
+            "start_at": _dt(sc.perturbation.start_at),
             "description": sc.perturbation.description,
+            "rise_rate_per_hour": sc.perturbation.rise_rate_per_hour,
+            "rise_duration_hours": sc.perturbation.rise_duration_hours,
+            "correlated_sensor": sc.perturbation.correlated_sensor,
+            "correlated_delta": sc.perturbation.correlated_delta,
+            "stuck_at": sc.perturbation.stuck_at,
+            "spike_delta": sc.perturbation.spike_delta,
         }
 
     return {

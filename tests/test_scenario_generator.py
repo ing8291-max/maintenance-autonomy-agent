@@ -122,19 +122,17 @@ def test_scenario_count_by_type(generated):
 
 
 def test_f2_pair_present(generated):
-    f2_abstain = [sc for sc in generated
-                  if sc.perturbation is not None and sc.perturbation.family == "F2"]
-    assert len(f2_abstain) >= 1, "Expected at least one F2 abstain scenario"
-    # Each abstain must have a corresponding act with the same pair_id
-    pair_ids = {sc.pair_id for sc in f2_abstain}
-    act_ids = {sc.pair_id for sc in generated if sc.pair_role == "act" and sc.pair_id in pair_ids}
-    assert pair_ids == act_ids, f"F2 abstain pair_ids without matching act: {pair_ids - act_ids}"
+    f2_scenarios = [sc for sc in generated
+                    if sc.perturbation is not None and sc.perturbation.family == "F2"]
+    assert len(f2_scenarios) == 2, "Expected an F2 act+abstain pair"
+    pair_ids = {sc.pair_id for sc in f2_scenarios}
+    assert len(pair_ids) == 1, "Both F2 members must share one pair_id"
+    roles = {sc.pair_role for sc in f2_scenarios}
+    assert roles == {"act", "abstain"}
 
 
 def test_f2_pair_one_causal_diff(generated):
-    from itertools import groupby
-
-    pairs = {}
+    pairs: dict[str, list] = {}
     for sc in generated:
         if sc.pair_id:
             pairs.setdefault(sc.pair_id, []).append(sc)
@@ -152,6 +150,80 @@ def test_f2_pair_one_causal_diff(generated):
         assert diffs == ["perturbation"], (
             f"F2 pair {pair_id}: expected only 'perturbation' diff, got {diffs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F2 pair normal-window design (both members injected, start_at near as_of)
+# ---------------------------------------------------------------------------
+
+
+def _f2_pair(scenarios):
+    f2 = [sc for sc in scenarios
+          if sc.perturbation is not None and sc.perturbation.family == "F2"]
+    act = next(s for s in f2 if s.pair_role == "act")
+    abstain = next(s for s in f2 if s.pair_role == "abstain")
+    return act, abstain
+
+
+def test_f2_pair_both_hardcase_on_normal_window(generated):
+    act, abstain = _f2_pair(generated)
+    # Both members live on a normal window: no failure_datetime, no timestamps.
+    for sc in (act, abstain):
+        assert sc.scenario_type == "hardcase"
+        assert sc.failure_datetime is None
+        assert sc.timestamps is None
+
+
+def test_f2_pair_actions(generated):
+    act, abstain = _f2_pair(generated)
+    assert act.ground_truth.action == "SCHEDULE_PM"
+    assert abstain.ground_truth.action == "CHECK_SENSOR"
+
+
+def test_f2_pair_kinds_differ(generated):
+    act, abstain = _f2_pair(generated)
+    assert act.perturbation.kind == "precursor_rise"
+    assert abstain.perturbation.kind == "sensor_stuck"
+
+
+def test_f2_pair_start_at_close_to_as_of(generated):
+    """F2 injection start must land shortly before as_of, not at data start.
+
+    This is the invariant the previous design violated: stuck_from used to be
+    pinned to failure_datetime - 72h, which drifted far from as_of. The new
+    design places start_at in [as_of - 48h, as_of).
+    """
+    from datetime import timedelta
+
+    act, abstain = _f2_pair(generated)
+    for sc in (act, abstain):
+        gap_hours = (sc.as_of - sc.perturbation.start_at).total_seconds() / 3600
+        assert 0 < gap_hours <= 48, (
+            f"{sc.scenario_id}: start_at {sc.perturbation.start_at} is "
+            f"{gap_hours:.1f}h before as_of {sc.as_of}; must be within 48h"
+        )
+
+
+def test_f2_pair_as_of_in_normal_window(generated):
+    """F2 as_of must sit in a window with no failure within ±7 days."""
+    import csv
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    act, _abstain = _f2_pair(generated)
+    mid = act.machine_id
+    as_of = act.as_of
+    gap = timedelta(days=7)
+
+    raw = Path(__file__).parents[1] / "data" / "raw" / "PdM_failures.csv"
+    with raw.open() as f:
+        for row in csv.DictReader(f):
+            if int(row["machineID"]) != mid:
+                continue
+            fdt = datetime.strptime(row["datetime"], "%Y-%m-%d %H:%M:%S")
+            assert abs((as_of - fdt).total_seconds()) >= gap.total_seconds(), (
+                f"F2 as_of {as_of} is within ±7d of failure {fdt} on machine {mid}"
+            )
 
 
 # ---------------------------------------------------------------------------

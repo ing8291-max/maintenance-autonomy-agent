@@ -1,8 +1,12 @@
 """Scenario YAML schema — ADR 0006 / ADR 0009.
 
 Three timestamps (anomaly_onset, first_observable, point_of_no_return) are
-required for act scenarios per ADR 0006. as_of must be before failure per
-ADR 0009.
+required for pre_failure_* scenarios per ADR 0006. as_of must be before failure
+per ADR 0009.
+
+Perturbation describes a synthetic signal injection on top of a chosen window.
+Three kinds are supported: ``precursor_rise`` (true degradation), ``sensor_stuck``
+(frozen reading), ``sensor_spike`` (lone jump). See docs/synthesis-protocol.md.
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ ScenarioType = Literal["normal", "pre_failure_24_48h", "pre_failure_0_24h", "har
 SplitType = Literal["dev", "eval"]
 PairRole = Literal["act", "abstain"]
 HardcaseFamily = Literal["F1", "F2", "F3", "F4", "F5"]
+PerturbationKind = Literal["precursor_rise", "sensor_stuck", "sensor_spike"]
 
 _VALID_ACTIONS: frozenset[str] = frozenset(
     ["NO_ACTION", "SCHEDULE_PM", "ESCALATE", "CHECK_SENSOR", "REQUEST_STOP"]
@@ -25,6 +30,7 @@ _VALID_SCENARIO_TYPES: frozenset[str] = frozenset(
     ["normal", "pre_failure_24_48h", "pre_failure_0_24h", "hardcase"]
 )
 _VALID_FAMILIES: frozenset[str] = frozenset(["F1", "F2", "F3", "F4", "F5"])
+_VALID_KINDS: frozenset[str] = frozenset(["precursor_rise", "sensor_stuck", "sensor_spike"])
 
 
 class SchemaError(ValueError):
@@ -62,10 +68,16 @@ class GroundTruth:
 @dataclass(frozen=True)
 class Perturbation:
     family: HardcaseFamily
+    kind: PerturbationKind
     sensor: str
-    stuck_at: float
-    stuck_from: datetime
+    start_at: datetime
     description: str
+    rise_rate_per_hour: Optional[float] = None
+    rise_duration_hours: Optional[int] = None
+    correlated_sensor: Optional[str] = None
+    correlated_delta: Optional[float] = None
+    stuck_at: Optional[float] = None
+    spike_delta: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.family not in _VALID_FAMILIES:
@@ -73,6 +85,22 @@ class Perturbation:
                 f"Invalid perturbation family {self.family!r}. "
                 f"Valid values: {sorted(_VALID_FAMILIES)}"
             )
+        if self.kind not in _VALID_KINDS:
+            raise SchemaError(
+                f"Invalid perturbation kind {self.kind!r}. "
+                f"Valid values: {sorted(_VALID_KINDS)}"
+            )
+        if self.kind == "precursor_rise":
+            if self.rise_rate_per_hour is None or self.rise_duration_hours is None:
+                raise SchemaError(
+                    "precursor_rise requires rise_rate_per_hour and rise_duration_hours"
+                )
+        elif self.kind == "sensor_stuck":
+            if self.stuck_at is None:
+                raise SchemaError("sensor_stuck requires stuck_at")
+        elif self.kind == "sensor_spike":
+            if self.spike_delta is None:
+                raise SchemaError("sensor_spike requires spike_delta")
 
 
 @dataclass(frozen=True)
@@ -103,7 +131,7 @@ class Scenario:
                 f"Invalid scenario_type {self.scenario_type!r}. "
                 f"Valid values: {sorted(_VALID_SCENARIO_TYPES)}"
             )
-        if self.scenario_type != "normal":
+        if self.scenario_type in ("pre_failure_24_48h", "pre_failure_0_24h"):
             if self.failure_datetime is None:
                 raise SchemaError(
                     f"failure_datetime is required for scenario_type={self.scenario_type!r}"
@@ -113,8 +141,12 @@ class Scenario:
                     f"as_of ({self.as_of}) must be strictly before "
                     f"failure_datetime ({self.failure_datetime})"
                 )
-        if self.scenario_type in ("pre_failure_24_48h", "pre_failure_0_24h"):
             if self.timestamps is None:
                 raise SchemaError(
                     f"timestamps is required for scenario_type={self.scenario_type!r}"
                 )
+        elif self.failure_datetime is not None and self.as_of >= self.failure_datetime:
+            raise SchemaError(
+                f"as_of ({self.as_of}) must be strictly before "
+                f"failure_datetime ({self.failure_datetime})"
+            )

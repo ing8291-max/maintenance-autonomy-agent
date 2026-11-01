@@ -36,3 +36,55 @@ Rules for generating scenario YAMLs that apply to both dev and eval hard-case sc
 ## 개발용 vs 평가용 머신
 
 합성기는 `data/splits.json`의 `dev` 집합에서만 머신 프로파일을 참조한다. 평가용 하드케이스 합성도 `eval` 집합에서만 참조한다. 읽기 도구에 `allow_eval=True`를 넘기는 쪽은 평가 파이프라인뿐이다.
+
+## F2 쌍 — 주입 패턴 (normal window)
+
+F2 쌍은 **고장이 없는 창**(as_of 앞뒤 7일 안에 고장 기록이 전혀 없음) 위에서 두 시나리오를 짝지어 돌린다. 베이스는 완전히 같고, 바뀌는 것은 '어떤 패턴을 주입했는가' 하나뿐이다.
+
+| 역할 | `kind` | 센서 | 시작 시각 | 정답 행동 |
+|---|---|---|---|---|
+| act | `precursor_rise` | vibration (+ rotate 동반) | `as_of − 24h` | `SCHEDULE_PM` |
+| abstain | `sensor_stuck` | vibration | `as_of − 18h` | `CHECK_SENSOR` |
+
+두 멤버의 `scenario_type`은 `hardcase`, `failure_datetime=null`, `timestamps=null`이다. 주입 외의 모든 인과 필드(머신, 시드, as_of 등)는 동일하다.
+
+### precursor_rise (실제 전조)
+- vibration이 `start_at`부터 `rise_duration_hours`(기본 24h) 동안 선형으로 상승. 기울기 `rise_rate_per_hour`는 베이스라인 `2·std / 24h`.
+- 동반 신호: `correlated_sensor=rotate`가 같은 창에서 `−1.5·σ_rotate`만큼 선형으로 떠내려감. "진동만 혼자 뛰는지 아니면 다른 신호도 같이 변하는지"가 센서 고장과 구분되는 핵심 단서다.
+- `start_at`은 반드시 `(as_of − 48h, as_of)` 안에 있어야 한다(테스트 `test_f2_pair_start_at_close_to_as_of`로 강제).
+
+### sensor_stuck (센서 고장)
+- vibration이 `start_at`(기본 `as_of − 18h`)부터 `stuck_at`(베이스라인 평균) 값에 **그대로 굳는다**. 분산이 사라지는 모양.
+- 다른 신호(rotate, pressure, volt)는 그대로 둔다. "한 신호만 조용히 얼어붙었는지"가 핵심 단서.
+- (대안형: `sensor_spike` — 단일 틱이 베이스라인 평균에서 `spike_delta`만큼 혼자 튐. 지금 기본 쌍에는 쓰지 않지만 스키마는 지원.)
+
+### 베이스라인은 어디서 재나
+`as_of` 바로 앞 30일 창(`[as_of − 30d, as_of)`)에서 각 센서의 평균·표준편차를 계산한다. 이 값이 `stuck_at`과 `rise_rate_per_hour`, `correlated_delta`의 근거다. 생성기에선 `_sensor_stats`가 담당한다.
+
+### 개발용 설비에서 측정한 값 (머신 20, seed=42)
+
+seed=42로 돌리면 F2 쌍이 머신 20의 `as_of = 2015-04-27 14:00:00`에 놓인다. 그 시점 바로 앞 30일(=720시간)의 베이스라인은:
+
+| 신호 | 평균 | 표준편차 |
+|---|---|---|
+| vibration | 40.68 | 5.39 |
+| rotate | 450.85 | 50.56 |
+| pressure | 102.82 | 12.33 |
+| volt | 172.00 | 15.44 |
+
+생성기는 이 값으로 다음을 뽑는다:
+- `rise_rate_per_hour = round(2·5.39/24, 3) = 0.449` (vibration)
+- `correlated_delta = round(−1.5·50.56, 2) = −75.84` (rotate)
+- `stuck_at = round(40.68, 2) = 40.68`
+
+### 이상 시작 시점의 참고값 (dev 머신 실제 고장)
+
+같은 창 규칙(베이스라인 평균 + 2·std)으로 dev 머신 몇 대의 실제 고장을 재면, 센서가 처음 분명히 뜨는 시각이 고장보다 **35~47시간 앞**이다. 참고치:
+
+| 머신 | 고장 시각 | 베이스라인 (vib 평균/sd) | 처음 vib>μ+2σ | 고장과의 간격 |
+|---|---|---|---|---|
+| 20 | 2015-01-19 06:00 | 41.54 / 6.46 | 2015-01-17 07:00 | 47h |
+| 2  | 2015-03-19 06:00 | 40.23 / 4.87 | 2015-03-17 19:00 | 35h |
+| 4  | 2015-01-17 06:00 | 40.38 / 4.57 | 2015-01-15 15:00 | 39h |
+
+이 분포가 F2 `rise_duration_hours = 24`의 근거다. 실제 전조가 ‘뜨는 데서 고장까지’ 보통 하루~이틀이니, 합성 전조도 그 범위 안에 머문다.
