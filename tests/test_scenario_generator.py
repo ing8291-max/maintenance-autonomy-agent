@@ -212,35 +212,53 @@ def test_f2_pair_start_at_close_to_as_of(generated):
         )
 
 
-def test_f2_act_lead_time_in_measured_band(generated):
-    """act's precursor must lead as_of by 35-47h — matches real precursor timing.
-
-    Measured on dev machines (docs/synthesis-protocol.md § F2 patterns): the
-    first time vibration crosses μ+2σ is 35-47h before the real failure. Our
-    synthetic precursor sits in the same band.
-    """
+def test_f2_act_start_at_range(generated):
+    """act's precursor must begin 6-18h before as_of (partial precursor only)."""
     act, _ = _f2_pair(generated)
-    lead_hours = (act.as_of - act.perturbation.start_at).total_seconds() / 3600
-    assert 35 <= lead_hours <= 47, (
-        f"{act.scenario_id}: lead time {lead_hours:.1f}h outside [35, 47]"
+    offset_hours = (act.as_of - act.perturbation.start_at).total_seconds() / 3600
+    assert 6 <= offset_hours <= 18, (
+        f"{act.scenario_id}: start_at offset {offset_hours:.1f}h outside [6, 18]"
     )
 
 
-def test_f2_act_total_rise_is_two_sigma(generated):
-    """Total vibration rise from start_at to as_of must equal 2σ (within rounding)."""
+def test_f2_act_implied_failure_at_least_24h_after_as_of(generated):
+    """implied_failure must sit ≥24h past as_of so SCHEDULE_PM is correct."""
+    from datetime import timedelta
+
+    act, _ = _f2_pair(generated)
+    implied = act.perturbation.implied_failure
+    assert implied is not None, "act must record implied_failure"
+    assert implied - act.as_of >= timedelta(hours=24), (
+        f"implied_failure {implied} is only "
+        f"{(implied - act.as_of).total_seconds() / 3600:.1f}h after as_of "
+        f"{act.as_of}; must be ≥24h"
+    )
+
+
+def test_f2_act_lead_matches_implied_failure(generated):
+    """lead = start_at → implied_failure must stay in the measured 35-47h band."""
+    from datetime import timedelta
+
+    act, _ = _f2_pair(generated)
+    pert = act.perturbation
+    lead = (pert.implied_failure - pert.start_at).total_seconds() / 3600
+    assert 35 <= lead <= 47, (
+        f"{act.scenario_id}: lead {lead:.1f}h outside measured [35, 47]"
+    )
+    assert pert.rise_duration_hours == int(lead), (
+        "rise_duration_hours must equal start_at→implied_failure lead"
+    )
+
+
+def test_f2_act_rise_rate_targets_two_sigma_at_implied_failure(generated):
+    """rise_rate · rise_duration ≈ 2σ (vib) — full rise reached at implied_failure."""
     import csv
     import statistics
-    from datetime import timedelta
+    from datetime import datetime, timedelta
     from pathlib import Path
 
     act, _ = _f2_pair(generated)
     pert = act.perturbation
-    lead_hours = (act.as_of - pert.start_at).total_seconds() / 3600
-    assert pert.rise_duration_hours == int(lead_hours), (
-        "rise_duration_hours must span start_at..as_of"
-    )
-
-    # Recompute baseline σ for the paired machine over [as_of-30d, as_of).
     raw = Path(__file__).parents[1] / "data" / "raw" / "PdM_telemetry.csv"
     end = act.as_of
     start = end - timedelta(days=30)
@@ -249,23 +267,28 @@ def test_f2_act_total_rise_is_two_sigma(generated):
         for row in csv.DictReader(f):
             if int(row["machineID"]) != act.machine_id:
                 continue
-            from datetime import datetime
             dt = datetime.strptime(row["datetime"], "%Y-%m-%d %H:%M:%S")
             if start <= dt < end:
                 vals.append(float(row["vibration"]))
     sigma = statistics.stdev(vals)
     total_rise_sd = pert.rise_rate_per_hour * pert.rise_duration_hours / sigma
     assert abs(total_rise_sd - 2.0) < 0.01, (
-        f"total rise {total_rise_sd:.3f}σ, expected 2.0σ"
+        f"full-trajectory rise {total_rise_sd:.3f}σ, expected 2.0σ"
     )
 
 
 def test_f2_act_has_timestamps_abstain_does_not(generated):
-    """ADR 0006 timestamps: act carries anomaly_onset+PONR, abstain stays null."""
+    """ADR 0006 timestamps: act's PONR = implied_failure − 12h (not as_of)."""
+    from datetime import timedelta
+
     act, abstain = _f2_pair(generated)
     assert act.timestamps is not None
     assert act.timestamps.anomaly_onset == act.perturbation.start_at
-    assert act.timestamps.point_of_no_return == act.as_of
+    expected_ponr = act.perturbation.implied_failure - timedelta(hours=12)
+    assert act.timestamps.point_of_no_return == expected_ponr
+    assert act.timestamps.point_of_no_return > act.as_of, (
+        "PONR must be strictly after as_of"
+    )
     assert abstain.timestamps is None
 
 

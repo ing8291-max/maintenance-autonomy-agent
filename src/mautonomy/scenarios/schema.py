@@ -78,6 +78,9 @@ class Perturbation:
     correlated_delta: Optional[float] = None
     stuck_at: Optional[float] = None
     spike_delta: Optional[float] = None
+    # Implied failure time when the injected trajectory is followed to the end.
+    # For precursor_rise this equals start_at + rise_duration_hours.
+    implied_failure: Optional[datetime] = None
 
     def __post_init__(self) -> None:
         if self.family not in _VALID_FAMILIES:

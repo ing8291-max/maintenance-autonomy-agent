@@ -43,16 +43,30 @@ F2 쌍은 **고장이 없는 창**(as_of 앞뒤 7일 안에 고장 기록이 전
 
 | 역할 | `kind` | 센서 | 시작 시각 | 정답 행동 |
 |---|---|---|---|---|
-| act | `precursor_rise` | vibration (+ rotate 동반) | `as_of − 35h ~ as_of − 47h` (seed 기반) | `SCHEDULE_PM` |
+| act | `precursor_rise` | vibration (+ rotate 동반) | `as_of − 6h ~ as_of − 18h` (seed 기반) | `SCHEDULE_PM` |
 | abstain | `sensor_stuck` | vibration | `as_of − 18h` | `CHECK_SENSOR` |
 
 두 멤버의 `scenario_type`은 `hardcase`, `failure_datetime=null`, `timestamps=null`이다. 주입 외의 모든 인과 필드(머신, 시드, as_of 등)는 동일하다.
 
 ### precursor_rise (실제 전조)
-- vibration이 `start_at`부터 `rise_duration_hours`(= `as_of − start_at`) 동안 선형으로 상승. 상승 구간이 `as_of`에서 끝나도록 `rise_rate_per_hour = 2·σ / rise_duration_hours`로 잡는다. 즉 **as_of 까지의 총 상승량은 항상 2σ**.
-- 동반 신호: `correlated_sensor=rotate`가 같은 창에서 `−1.5·σ_rotate`만큼 선형으로 떠내려감. "진동만 혼자 뛰는지 아니면 다른 신호도 같이 변하는지"가 센서 고장과 구분되는 핵심 단서다.
-- `start_at`은 **as_of 로부터 35~47시간 앞**(dev 머신 실측 선행시간 분포, 아래 표 참조)에서 seed 기반 rng로 뽑는다. 테스트 `test_f2_act_lead_time_in_measured_band` / `test_f2_act_total_rise_is_two_sigma`가 강제한다.
-- `scenario_type=hardcase` 이지만 ADR 0006 세 시점을 함께 기록한다: `anomaly_onset=start_at`, `first_observable=start_at`(주입 즉시 보임), `point_of_no_return=as_of`(합성 고장 시각 = `as_of + 12h` 가정, PONR = failure − 12h = as_of). 이걸로 적시 비율을 계산한다.
+
+**시간 구조** — 세 시각이 서로 다른 것을 지키는 게 핵심.
+
+```
+       start_at          as_of                       implied_failure
+          |                |                                |
+          |---- 6~18h -----|-------- lead − offset ---------|
+          |---------------- lead (35~47h) -----------------|
+                                            |------ 12h ----|
+                                            PONR
+```
+
+- **선행시간(lead)**: `start_at → implied_failure`. dev 머신 실측(35~47h 분포, 아래 표)에서 뽑는다. 이 숫자는 "전조 시작부터 실제 고장까지"를 의미하지, "전조 시작부터 관찰 시각까지"가 아니다.
+- **start_at 오프셋**: `as_of − 6h ~ as_of − 18h`. 에이전트가 보는 창에서 전조는 아직 **일부만 자란 상태**다.
+- **implied_failure = start_at + lead**. SCHEDULE_PM 정답이 성립하려면 **implied_failure ≥ as_of + 24h**(테스트 `test_f2_act_implied_failure_at_least_24h_after_as_of`로 강제). 생성기는 `lead ≥ offset + 24` 를 보장해 뽑는다.
+- **rise_rate_per_hour = 2·σ_vib / lead** (즉 implied_failure 에서 총 +2σ 상승). as_of 시점의 노출량은 `(2·offset / lead) σ` — offset=6, lead=47 이면 0.26σ, offset=18, lead=42 이면 0.86σ. 즉 **에이전트는 '서서히 뜨고 있는 중'인 신호를 본다**.
+- **동반 신호**: `correlated_sensor=rotate` 가 **같은 `[start_at, implied_failure]` 창에서** `−1.5·σ_rotate` 만큼 선형으로 떠내려감. 30일 베이스라인 전체에 걸치는 변화가 아니다 — 베이스라인은 σ를 재는 데만 쓰고, 드리프트는 주입 창 안에서만 산다.
+- **ADR 0006 세 시점**: `anomaly_onset=start_at`, `first_observable=start_at`(주입 즉시 보임), `point_of_no_return = implied_failure − 12h`. PONR 은 반드시 `as_of` 보다 뒤에 있어야 한다(테스트 `test_f2_act_has_timestamps_abstain_does_not`).
 
 ### sensor_stuck (센서 고장)
 - vibration이 `start_at`(기본 `as_of − 18h`)부터 `stuck_at`(베이스라인 평균) 값에 **그대로 굳는다**. 분산이 사라지는 모양.
@@ -76,11 +90,15 @@ seed=42로 돌리면 F2 쌍이 머신 20의 `as_of = 2015-04-27 14:00:00`에 놓
 | pressure | 102.82 | 12.33 |
 | volt | 172.00 | 15.44 |
 
-rng 가 뽑은 리드 타임 `lead_hours = 41h` (범위 35~47h) 이므로:
-- `start_at = 2015-04-25 21:00:00`, `rise_duration_hours = 41`
-- `rise_rate_per_hour = round(2·5.39/41, 4) = 0.2627` → 41h × 0.2627 ≈ **+10.77 (≈ 2σ)**
-- `correlated_delta = round(−1.5·50.56, 2) = −75.84` (rotate, 같은 창 전체)
-- `stuck_at = round(40.68, 2) = 40.68`, abstain의 `start_at = as_of − 18h = 2015-04-26 20:00:00`
+rng 가 뽑은 값: `start_at_offset = 12h`, `lead = 40h`. 결과:
+- `start_at = 2015-04-27 02:00:00` (as_of − 12h)
+- `implied_failure = 2015-04-28 18:00:00` (as_of + 28h, 24h 가드 통과)
+- `rise_duration_hours = 40`, `rise_rate_per_hour = round(2·5.39/40, 4) = 0.2693`
+- implied_failure 에서 총 상승 = 40 × 0.2693 ≈ **+10.77 (≈ 2σ)**
+- **as_of 에서 지금까지 쌓인 상승 ≈ 0.60σ** (12/40 × 2σ = 3.23 ≈ 0.60σ)
+- `correlated_delta = round(−1.5·50.56, 2) = −75.84` (rotate, `[start_at, implied_failure]` 창 내부에서만)
+- `PONR = 2015-04-28 06:00:00` (implied − 12h, as_of 보다 16h 뒤)
+- abstain: `stuck_at = round(40.68, 2) = 40.68`, `start_at = as_of − 18h = 2015-04-26 20:00:00`
 
 ### 이상 시작 시점의 참고값 (dev 머신 실제 고장)
 
@@ -92,7 +110,7 @@ rng 가 뽑은 리드 타임 `lead_hours = 41h` (범위 35~47h) 이므로:
 | 2  | 2015-03-19 06:00 | 40.23 / 4.87 | 2015-03-17 19:00 | 35h |
 | 4  | 2015-01-17 06:00 | 40.38 / 4.57 | 2015-01-15 15:00 | 39h |
 
-이 분포가 **F2 `start_at ∈ [as_of − 47h, as_of − 35h]`의 근거**다. rng 가 그 안에서 머신·seed별로 하나를 뽑고, `rise_duration_hours` 는 `as_of − start_at` 과 같아진다.
+이 분포가 **F2 `lead ∈ [35, 47]` (= `start_at → implied_failure`) 의 근거**다. `start_at` 자체는 as_of 로부터 6~18h 뒤로 당겨 잡고, 남은 선행시간을 implied_failure 에 꽂는다. 그래서 as_of 시점의 에이전트는 "뜨고 있는 중"인 전조만 본다.
 
 ## 에이전트 단계 주의 — 보여선 안 되는 것
 
@@ -103,7 +121,7 @@ rng 가 뽑은 리드 타임 `lead_hours = 41h` (범위 35~47h) 이므로:
 | `perturbation` 블록 전체 | 어떤 패턴을 주입했는지 알려 주면 F2 짝의 의미가 사라진다. "precursor_rise" 라고 쓰여 있으면 CHECK_SENSOR 를 고를 이유가 없다. |
 | `ground_truth` (`action`, `rationale`) | 정답을 그대로 베끼게 된다. |
 | `timestamps.anomaly_onset`, `timestamps.first_observable` | 전조가 언제 시작됐는지는 에이전트가 **읽기 도구 출력에서 스스로 추론해야 하는 것**이다. 라벨로 넘기면 평가 자체가 무의미하다. |
-| `failure_datetime`, `failure_component` | pre_failure_* 시나리오에서도 미래 라벨이다. 숨긴다. |
+| `failure_datetime`, `failure_component`, `perturbation.implied_failure` | 모두 미래 라벨. 숨긴다. |
 | `scenario_type`, `pair_id`, `pair_role` | F2 짝 중 어느 쪽인지 알면 "이건 함정이다"가 바로 보인다. |
 
 에이전트가 받아도 되는 것은 `machine_id`, `as_of`, 그리고 **읽기 도구가 돌려주는 센서 값뿐**이다.

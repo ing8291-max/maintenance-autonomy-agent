@@ -72,6 +72,7 @@ def _opt_int(raw: dict[str, Any], key: str) -> int | None:
 
 
 def _parse_perturbation(raw: dict[str, Any]) -> Perturbation:
+    implied = raw.get("implied_failure")
     return Perturbation(
         family=_require(raw, "family"),
         kind=_require(raw, "kind"),
@@ -84,6 +85,7 @@ def _parse_perturbation(raw: dict[str, Any]) -> Perturbation:
         correlated_delta=_opt_float(raw, "correlated_delta"),
         stuck_at=_opt_float(raw, "stuck_at"),
         spike_delta=_opt_float(raw, "spike_delta"),
+        implied_failure=_parse_dt(implied, "implied_failure") if implied else None,
     )
 
 
@@ -187,6 +189,7 @@ def _to_dict(sc: Scenario) -> dict[str, Any]:
             "correlated_delta": sc.perturbation.correlated_delta,
             "stuck_at": sc.perturbation.stuck_at,
             "spike_delta": sc.perturbation.spike_delta,
+            "implied_failure": _dt(sc.perturbation.implied_failure),
         }
 
     return {

@@ -42,15 +42,25 @@ _POINT_OF_NO_RETURN_HOURS_BEFORE_FAILURE = 12
 
 # F2 pair injection parameters (see docs/synthesis-protocol.md § F2 patterns)
 _F2_NORMAL_HALF_WINDOW_DAYS = 7
-# Lead-time bounds for the precursor: matches measured 35-47h window of
-# real dev-machine failures (docs/synthesis-protocol.md § F2 patterns).
+# Precursor lead time (start_at → implied_failure). Matches the measured
+# precursor-to-failure band on dev machines (docs/synthesis-protocol.md).
 _F2_PRECURSOR_LEAD_MIN_HOURS = 35
 _F2_PRECURSOR_LEAD_MAX_HOURS = 47
-# Total rise of the vibration signal from start_at to as_of, in σ units.
+# How far before as_of the precursor begins: a visible-but-not-mature chunk
+# of the trajectory. Keeps as_of strictly before the implied failure.
+_F2_START_AT_OFFSET_MIN_HOURS = 6
+_F2_START_AT_OFFSET_MAX_HOURS = 18
+# Guard: implied_failure must be at least this far after as_of so that
+# SCHEDULE_PM is still a legitimate "schedule, don't rush" answer.
+_F2_MIN_IMPLIED_FAILURE_GAP_HOURS = 24
+# Total rise of vibration from start_at to implied_failure, in σ.
 _F2_PRECURSOR_RISE_SD = 2.0
-# Correlated drift of rotate across the same window, in σ units.
+# Correlated drift of rotate across the SAME [start_at, implied_failure]
+# window, in σ units. Not the 30-day baseline — the baseline is only used
+# to measure σ; the drift lives inside the injection window.
 _F2_CORRELATED_DELTA_SD = -1.5
 _F2_STUCK_LEAD_HOURS = 18
+_F2_PONR_HOURS_BEFORE_FAILURE = 12
 
 # Eval guard: evaluated once, then cached
 _EVAL_MACHINES: set[int] | None = None
@@ -438,15 +448,31 @@ def _pick_f2_pair(
 
         pair_id = f"f2-pair-{seed:04d}-{mid:04d}"
 
-        # Precursor lead time: sampled from the measured 35-47h band so that
-        # the synthetic trace matches real dev-machine failure precursors.
-        lead_hours = rng.randint(
-            _F2_PRECURSOR_LEAD_MIN_HOURS, _F2_PRECURSOR_LEAD_MAX_HOURS
+        # Precursor starts a short time before as_of (6-18h), so the agent at
+        # as_of sees a partial, not fully-mature trajectory.
+        start_at_offset = rng.randint(
+            _F2_START_AT_OFFSET_MIN_HOURS, _F2_START_AT_OFFSET_MAX_HOURS
         )
-        precursor_start = as_of - timedelta(hours=lead_hours)
-        # Rise spans [start_at, as_of] exactly: total rise = _F2_PRECURSOR_RISE_SD · σ
+        precursor_start = as_of - timedelta(hours=start_at_offset)
+        # Lead = start_at → implied_failure, in the measured 35-47h band.
+        # Also require implied_failure ≥ as_of + 24h so SCHEDULE_PM remains the
+        # right answer (fail is near but not immediate).
+        min_lead = max(
+            _F2_PRECURSOR_LEAD_MIN_HOURS,
+            start_at_offset + _F2_MIN_IMPLIED_FAILURE_GAP_HOURS,
+        )
+        lead_hours = rng.randint(min_lead, _F2_PRECURSOR_LEAD_MAX_HOURS)
+        implied_failure = precursor_start + timedelta(hours=lead_hours)
+        # Rise reaches +2σ at implied_failure. At as_of the signal has moved
+        # (2σ · start_at_offset / lead_hours) — a partial precursor.
         rise_rate = round(_F2_PRECURSOR_RISE_SD * vib_std / lead_hours, 4)
+        total_rise_at_as_of_sd = round(
+            _F2_PRECURSOR_RISE_SD * start_at_offset / lead_hours, 3
+        )
         correlated_delta = round(_F2_CORRELATED_DELTA_SD * rot_std, 2)
+        point_of_no_return = implied_failure - timedelta(
+            hours=_F2_PONR_HOURS_BEFORE_FAILURE
+        )
 
         act = Scenario(
             schema_version="1.0",
@@ -459,9 +485,10 @@ def _pick_f2_pair(
             ground_truth=GroundTruth(
                 action="SCHEDULE_PM",
                 rationale=(
-                    f"Vibration drifted +{_F2_PRECURSOR_RISE_SD:.1f}σ over "
-                    f"{lead_hours}h with correlated rotate decline — real "
-                    "precursor, schedule PM"
+                    f"Vibration drifting +{total_rise_at_as_of_sd:.2f}σ since "
+                    f"{start_at_offset}h ago with correlated rotate decline; "
+                    f"implied failure ~{lead_hours - start_at_offset}h away — "
+                    "schedule PM"
                 ),
             ),
             failure_datetime=None,
@@ -469,11 +496,11 @@ def _pick_f2_pair(
             # ADR 0006 timestamps on the injected timeline:
             #   anomaly_onset       = precursor injection start
             #   first_observable    = precursor injection start (visible from tick 0)
-            #   point_of_no_return  = as_of (synthetic failure = as_of + 12h ⇒ PONR − 12h = as_of)
+            #   point_of_no_return  = implied_failure - 12h  (strictly after as_of)
             timestamps=Timestamps(
                 anomaly_onset=precursor_start,
                 first_observable=precursor_start,
-                point_of_no_return=as_of,
+                point_of_no_return=point_of_no_return,
             ),
             perturbation=Perturbation(
                 family="F2",
@@ -481,14 +508,18 @@ def _pick_f2_pair(
                 sensor="vibration",
                 start_at=precursor_start,
                 description=(
-                    f"vibration rises {rise_rate:.4f}/h for "
-                    f"{lead_hours}h ({_F2_PRECURSOR_RISE_SD:.1f}σ total) with "
-                    f"rotate drifting by {correlated_delta:.2f} over the same window"
+                    f"vibration rises {rise_rate:.4f}/h for {lead_hours}h to "
+                    f"+{_F2_PRECURSOR_RISE_SD:.1f}σ at implied failure; by as_of "
+                    f"({start_at_offset}h in) the signal has moved "
+                    f"+{total_rise_at_as_of_sd:.2f}σ. rotate drifts "
+                    f"{correlated_delta:.2f} over the same [start_at, "
+                    "implied_failure] window"
                 ),
                 rise_rate_per_hour=rise_rate,
                 rise_duration_hours=lead_hours,
                 correlated_sensor="rotate",
                 correlated_delta=correlated_delta,
+                implied_failure=implied_failure,
             ),
             pair_id=pair_id,
             pair_role="act",
