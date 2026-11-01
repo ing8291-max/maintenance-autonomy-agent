@@ -43,25 +43,29 @@ F2 쌍은 **고장이 없는 창**(as_of 앞뒤 7일 안에 고장 기록이 전
 
 | 역할 | `kind` | 센서 | 시작 시각 | 정답 행동 |
 |---|---|---|---|---|
-| act | `precursor_rise` | vibration (+ rotate 동반) | `as_of − 24h` | `SCHEDULE_PM` |
+| act | `precursor_rise` | vibration (+ rotate 동반) | `as_of − 35h ~ as_of − 47h` (seed 기반) | `SCHEDULE_PM` |
 | abstain | `sensor_stuck` | vibration | `as_of − 18h` | `CHECK_SENSOR` |
 
 두 멤버의 `scenario_type`은 `hardcase`, `failure_datetime=null`, `timestamps=null`이다. 주입 외의 모든 인과 필드(머신, 시드, as_of 등)는 동일하다.
 
 ### precursor_rise (실제 전조)
-- vibration이 `start_at`부터 `rise_duration_hours`(기본 24h) 동안 선형으로 상승. 기울기 `rise_rate_per_hour`는 베이스라인 `2·std / 24h`.
+- vibration이 `start_at`부터 `rise_duration_hours`(= `as_of − start_at`) 동안 선형으로 상승. 상승 구간이 `as_of`에서 끝나도록 `rise_rate_per_hour = 2·σ / rise_duration_hours`로 잡는다. 즉 **as_of 까지의 총 상승량은 항상 2σ**.
 - 동반 신호: `correlated_sensor=rotate`가 같은 창에서 `−1.5·σ_rotate`만큼 선형으로 떠내려감. "진동만 혼자 뛰는지 아니면 다른 신호도 같이 변하는지"가 센서 고장과 구분되는 핵심 단서다.
-- `start_at`은 반드시 `(as_of − 48h, as_of)` 안에 있어야 한다(테스트 `test_f2_pair_start_at_close_to_as_of`로 강제).
+- `start_at`은 **as_of 로부터 35~47시간 앞**(dev 머신 실측 선행시간 분포, 아래 표 참조)에서 seed 기반 rng로 뽑는다. 테스트 `test_f2_act_lead_time_in_measured_band` / `test_f2_act_total_rise_is_two_sigma`가 강제한다.
+- `scenario_type=hardcase` 이지만 ADR 0006 세 시점을 함께 기록한다: `anomaly_onset=start_at`, `first_observable=start_at`(주입 즉시 보임), `point_of_no_return=as_of`(합성 고장 시각 = `as_of + 12h` 가정, PONR = failure − 12h = as_of). 이걸로 적시 비율을 계산한다.
 
 ### sensor_stuck (센서 고장)
 - vibration이 `start_at`(기본 `as_of − 18h`)부터 `stuck_at`(베이스라인 평균) 값에 **그대로 굳는다**. 분산이 사라지는 모양.
 - 다른 신호(rotate, pressure, volt)는 그대로 둔다. "한 신호만 조용히 얼어붙었는지"가 핵심 단서.
+- 행동할 실제 고장이 없으므로 **ADR 0006 세 시점은 저장하지 않는다**(`timestamps: null`). CHECK_SENSOR는 적시/너무 늦음 판정 대상이 아니다.
 - (대안형: `sensor_spike` — 단일 틱이 베이스라인 평균에서 `spike_delta`만큼 혼자 튐. 지금 기본 쌍에는 쓰지 않지만 스키마는 지원.)
 
 ### 베이스라인은 어디서 재나
-`as_of` 바로 앞 30일 창(`[as_of − 30d, as_of)`)에서 각 센서의 평균·표준편차를 계산한다. 이 값이 `stuck_at`과 `rise_rate_per_hour`, `correlated_delta`의 근거다. 생성기에선 `_sensor_stats`가 담당한다.
+`as_of` 바로 앞 30일 창(`[as_of − 30d, as_of)`)에서 **쌍을 만드는 그 설비 자체**의 각 센서 평균·표준편차를 계산한다. μ·σ는 전역 상수가 아니라 매번 머신 ID 기준으로 다시 계산된다(생성기 `_sensor_stats`가 담당, 테스트 `test_f2_act_total_rise_is_two_sigma`가 쌍 머신 기준 2σ 상승을 확인). 이 값이 `stuck_at`·`rise_rate_per_hour`·`correlated_delta`의 근거다.
 
-### 개발용 설비에서 측정한 값 (머신 20, seed=42)
+### 개발용 설비에서 측정한 값 (예시: 머신 20, seed=42)
+
+아래 숫자는 **예시**다. 다른 머신·다른 seed 조합에서는 as_of 가 달라지고 μ·σ 도 달라진다. 중요한 것은 두 가지뿐: (a) 각 쌍은 짝지은 설비의 자기 μ·σ 를 기준으로 생성된다, (b) 상승량은 언제나 2σ 다.
 
 seed=42로 돌리면 F2 쌍이 머신 20의 `as_of = 2015-04-27 14:00:00`에 놓인다. 그 시점 바로 앞 30일(=720시간)의 베이스라인은:
 
@@ -72,10 +76,11 @@ seed=42로 돌리면 F2 쌍이 머신 20의 `as_of = 2015-04-27 14:00:00`에 놓
 | pressure | 102.82 | 12.33 |
 | volt | 172.00 | 15.44 |
 
-생성기는 이 값으로 다음을 뽑는다:
-- `rise_rate_per_hour = round(2·5.39/24, 3) = 0.449` (vibration)
-- `correlated_delta = round(−1.5·50.56, 2) = −75.84` (rotate)
-- `stuck_at = round(40.68, 2) = 40.68`
+rng 가 뽑은 리드 타임 `lead_hours = 41h` (범위 35~47h) 이므로:
+- `start_at = 2015-04-25 21:00:00`, `rise_duration_hours = 41`
+- `rise_rate_per_hour = round(2·5.39/41, 4) = 0.2627` → 41h × 0.2627 ≈ **+10.77 (≈ 2σ)**
+- `correlated_delta = round(−1.5·50.56, 2) = −75.84` (rotate, 같은 창 전체)
+- `stuck_at = round(40.68, 2) = 40.68`, abstain의 `start_at = as_of − 18h = 2015-04-26 20:00:00`
 
 ### 이상 시작 시점의 참고값 (dev 머신 실제 고장)
 
@@ -87,4 +92,29 @@ seed=42로 돌리면 F2 쌍이 머신 20의 `as_of = 2015-04-27 14:00:00`에 놓
 | 2  | 2015-03-19 06:00 | 40.23 / 4.87 | 2015-03-17 19:00 | 35h |
 | 4  | 2015-01-17 06:00 | 40.38 / 4.57 | 2015-01-15 15:00 | 39h |
 
-이 분포가 F2 `rise_duration_hours = 24`의 근거다. 실제 전조가 ‘뜨는 데서 고장까지’ 보통 하루~이틀이니, 합성 전조도 그 범위 안에 머문다.
+이 분포가 **F2 `start_at ∈ [as_of − 47h, as_of − 35h]`의 근거**다. rng 가 그 안에서 머신·seed별로 하나를 뽑고, `rise_duration_hours` 는 `as_of − start_at` 과 같아진다.
+
+## 에이전트 단계 주의 — 보여선 안 되는 것
+
+시나리오 YAML 은 **생성기와 평가기가 쓰는 라벨 파일**이지 에이전트의 입력이 아니다. 다음 필드는 평가가 끝날 때까지 에이전트에게 노출되면 안 된다:
+
+| 필드 | 왜 숨기나 |
+|---|---|
+| `perturbation` 블록 전체 | 어떤 패턴을 주입했는지 알려 주면 F2 짝의 의미가 사라진다. "precursor_rise" 라고 쓰여 있으면 CHECK_SENSOR 를 고를 이유가 없다. |
+| `ground_truth` (`action`, `rationale`) | 정답을 그대로 베끼게 된다. |
+| `timestamps.anomaly_onset`, `timestamps.first_observable` | 전조가 언제 시작됐는지는 에이전트가 **읽기 도구 출력에서 스스로 추론해야 하는 것**이다. 라벨로 넘기면 평가 자체가 무의미하다. |
+| `failure_datetime`, `failure_component` | pre_failure_* 시나리오에서도 미래 라벨이다. 숨긴다. |
+| `scenario_type`, `pair_id`, `pair_role` | F2 짝 중 어느 쪽인지 알면 "이건 함정이다"가 바로 보인다. |
+
+에이전트가 받아도 되는 것은 `machine_id`, `as_of`, 그리고 **읽기 도구가 돌려주는 센서 값뿐**이다.
+
+### 주입은 어디서 적용하나
+
+주입 패턴(`precursor_rise`, `sensor_stuck`, `sensor_spike`)은 **읽기 도구 출력 단계에서만 반영한다**:
+
+1. `read_telemetry(machine_id, as_of)` 가 원본 CSV 를 `as_of` 로 잘라 가져온다 (ADR 0009).
+2. 호출된 시나리오가 F2 짝이면, 리턴 직전에 **그 쌍의 `perturbation` 을 센서 값 리스트에 덧씌운다**. `precursor_rise` 는 `start_at` 이후 시각의 vibration 에 `(dt − start_at) · rise_rate_per_hour` 를 더하고, `sensor_stuck` 은 `start_at` 이후 vibration 을 `stuck_at` 으로 덮어쓴다.
+3. 다른 읽기 도구(`read_errors`, `read_maintenance_history`, `read_failure_history`)는 영향을 받지 않는다. 그 로그에는 합성 사건을 넣지 않는다.
+4. 에이전트의 추론 로그·프롬프트에는 "perturbation" 이라는 단어 자체가 들어가지 않도록 한다.
+
+이 규칙은 아직 코드로 강제되지 않았다(현재 `src/mautonomy/data/read_tools.py` 는 원본만 돌려준다). 하네스를 붙일 때 **읽기 도구 래퍼** 로 넣고, 그 래퍼가 `scenario.perturbation` 을 받아 센서 리스트를 변형한 뒤 돌려주도록 구현한다. 하네스 테스트에서 "YAML 전체"가 에이전트에게 흘러들지 않는지 보장하는 선택 테스트(allow-list)를 함께 둔다.

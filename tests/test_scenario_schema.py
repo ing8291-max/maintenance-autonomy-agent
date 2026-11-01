@@ -294,9 +294,12 @@ def _load_pair(tmp_path: Path):
 
 def test_f2_pair_one_causal_diff(tmp_path):
     act, abstain = _load_pair(tmp_path)
+    # timestamps are a derived consequence of the perturbation, not a separate
+    # causal knob (act carries an injected timeline, abstain has none).
+    derived = {"timestamps"}
     diffs = [
         f for f in _CAUSAL_FIELDS
-        if getattr(act, f) != getattr(abstain, f)
+        if f not in derived and getattr(act, f) != getattr(abstain, f)
     ]
     assert diffs == ["perturbation"], (
         f"Expected only 'perturbation' to differ, got: {diffs}"

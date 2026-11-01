@@ -42,11 +42,15 @@ _POINT_OF_NO_RETURN_HOURS_BEFORE_FAILURE = 12
 
 # F2 pair injection parameters (see docs/synthesis-protocol.md § F2 patterns)
 _F2_NORMAL_HALF_WINDOW_DAYS = 7
-_F2_PRECURSOR_DURATION_HOURS = 24
+# Lead-time bounds for the precursor: matches measured 35-47h window of
+# real dev-machine failures (docs/synthesis-protocol.md § F2 patterns).
+_F2_PRECURSOR_LEAD_MIN_HOURS = 35
+_F2_PRECURSOR_LEAD_MAX_HOURS = 47
+# Total rise of the vibration signal from start_at to as_of, in σ units.
 _F2_PRECURSOR_RISE_SD = 2.0
+# Correlated drift of rotate across the same window, in σ units.
 _F2_CORRELATED_DELTA_SD = -1.5
 _F2_STUCK_LEAD_HOURS = 18
-_F2_START_LEAD_MAX_HOURS = 48
 
 # Eval guard: evaluated once, then cached
 _EVAL_MACHINES: set[int] | None = None
@@ -434,9 +438,15 @@ def _pick_f2_pair(
 
         pair_id = f"f2-pair-{seed:04d}-{mid:04d}"
 
-        rise_rate = round(_F2_PRECURSOR_RISE_SD * vib_std / _F2_PRECURSOR_DURATION_HOURS, 3)
+        # Precursor lead time: sampled from the measured 35-47h band so that
+        # the synthetic trace matches real dev-machine failure precursors.
+        lead_hours = rng.randint(
+            _F2_PRECURSOR_LEAD_MIN_HOURS, _F2_PRECURSOR_LEAD_MAX_HOURS
+        )
+        precursor_start = as_of - timedelta(hours=lead_hours)
+        # Rise spans [start_at, as_of] exactly: total rise = _F2_PRECURSOR_RISE_SD · σ
+        rise_rate = round(_F2_PRECURSOR_RISE_SD * vib_std / lead_hours, 4)
         correlated_delta = round(_F2_CORRELATED_DELTA_SD * rot_std, 2)
-        precursor_start = as_of - timedelta(hours=_F2_PRECURSOR_DURATION_HOURS)
 
         act = Scenario(
             schema_version="1.0",
@@ -449,25 +459,34 @@ def _pick_f2_pair(
             ground_truth=GroundTruth(
                 action="SCHEDULE_PM",
                 rationale=(
-                    "Vibration rising steadily with correlated rotate drift — "
-                    "real precursor, schedule PM"
+                    f"Vibration drifted +{_F2_PRECURSOR_RISE_SD:.1f}σ over "
+                    f"{lead_hours}h with correlated rotate decline — real "
+                    "precursor, schedule PM"
                 ),
             ),
             failure_datetime=None,
             failure_component=None,
-            timestamps=None,
+            # ADR 0006 timestamps on the injected timeline:
+            #   anomaly_onset       = precursor injection start
+            #   first_observable    = precursor injection start (visible from tick 0)
+            #   point_of_no_return  = as_of (synthetic failure = as_of + 12h ⇒ PONR − 12h = as_of)
+            timestamps=Timestamps(
+                anomaly_onset=precursor_start,
+                first_observable=precursor_start,
+                point_of_no_return=as_of,
+            ),
             perturbation=Perturbation(
                 family="F2",
                 kind="precursor_rise",
                 sensor="vibration",
                 start_at=precursor_start,
                 description=(
-                    f"vibration rises {rise_rate:.3f}/h for "
-                    f"{_F2_PRECURSOR_DURATION_HOURS}h with rotate drifting by "
-                    f"{correlated_delta:.2f} over the same window"
+                    f"vibration rises {rise_rate:.4f}/h for "
+                    f"{lead_hours}h ({_F2_PRECURSOR_RISE_SD:.1f}σ total) with "
+                    f"rotate drifting by {correlated_delta:.2f} over the same window"
                 ),
                 rise_rate_per_hour=rise_rate,
-                rise_duration_hours=_F2_PRECURSOR_DURATION_HOURS,
+                rise_duration_hours=lead_hours,
                 correlated_sensor="rotate",
                 correlated_delta=correlated_delta,
             ),

@@ -132,6 +132,11 @@ def test_f2_pair_present(generated):
 
 
 def test_f2_pair_one_causal_diff(generated):
+    """The only *causal* difference between act and abstain is the perturbation.
+
+    timestamps also differ, but as a derived consequence of the perturbation
+    (act has an injected timeline; abstain is a sensor fault with no onset).
+    """
     pairs: dict[str, list] = {}
     for sc in generated:
         if sc.pair_id:
@@ -142,13 +147,18 @@ def test_f2_pair_one_causal_diff(generated):
     )}
     assert f2_pairs, "No F2 pairs found"
 
+    derived = {"timestamps"}
     for pair_id, scs in f2_pairs.items():
         assert len(scs) == 2, f"pair {pair_id} has {len(scs)} scenarios, expected 2"
         act = next(s for s in scs if s.pair_role == "act")
         abstain = next(s for s in scs if s.pair_role == "abstain")
-        diffs = [f for f in _CAUSAL_FIELDS if getattr(act, f) != getattr(abstain, f)]
-        assert diffs == ["perturbation"], (
-            f"F2 pair {pair_id}: expected only 'perturbation' diff, got {diffs}"
+        causal_diffs = [
+            f for f in _CAUSAL_FIELDS
+            if f not in derived and getattr(act, f) != getattr(abstain, f)
+        ]
+        assert causal_diffs == ["perturbation"], (
+            f"F2 pair {pair_id}: expected only 'perturbation' causal diff, "
+            f"got {causal_diffs}"
         )
 
 
@@ -167,11 +177,12 @@ def _f2_pair(scenarios):
 
 def test_f2_pair_both_hardcase_on_normal_window(generated):
     act, abstain = _f2_pair(generated)
-    # Both members live on a normal window: no failure_datetime, no timestamps.
+    # Both members live on a normal window with no real failure.
     for sc in (act, abstain):
         assert sc.scenario_type == "hardcase"
         assert sc.failure_datetime is None
-        assert sc.timestamps is None
+    # Timestamps live on the act side only (abstain has no onset to time against).
+    assert abstain.timestamps is None
 
 
 def test_f2_pair_actions(generated):
@@ -190,11 +201,8 @@ def test_f2_pair_start_at_close_to_as_of(generated):
     """F2 injection start must land shortly before as_of, not at data start.
 
     This is the invariant the previous design violated: stuck_from used to be
-    pinned to failure_datetime - 72h, which drifted far from as_of. The new
-    design places start_at in [as_of - 48h, as_of).
+    pinned to failure_datetime - 72h, which drifted far from as_of.
     """
-    from datetime import timedelta
-
     act, abstain = _f2_pair(generated)
     for sc in (act, abstain):
         gap_hours = (sc.as_of - sc.perturbation.start_at).total_seconds() / 3600
@@ -202,6 +210,63 @@ def test_f2_pair_start_at_close_to_as_of(generated):
             f"{sc.scenario_id}: start_at {sc.perturbation.start_at} is "
             f"{gap_hours:.1f}h before as_of {sc.as_of}; must be within 48h"
         )
+
+
+def test_f2_act_lead_time_in_measured_band(generated):
+    """act's precursor must lead as_of by 35-47h — matches real precursor timing.
+
+    Measured on dev machines (docs/synthesis-protocol.md § F2 patterns): the
+    first time vibration crosses μ+2σ is 35-47h before the real failure. Our
+    synthetic precursor sits in the same band.
+    """
+    act, _ = _f2_pair(generated)
+    lead_hours = (act.as_of - act.perturbation.start_at).total_seconds() / 3600
+    assert 35 <= lead_hours <= 47, (
+        f"{act.scenario_id}: lead time {lead_hours:.1f}h outside [35, 47]"
+    )
+
+
+def test_f2_act_total_rise_is_two_sigma(generated):
+    """Total vibration rise from start_at to as_of must equal 2σ (within rounding)."""
+    import csv
+    import statistics
+    from datetime import timedelta
+    from pathlib import Path
+
+    act, _ = _f2_pair(generated)
+    pert = act.perturbation
+    lead_hours = (act.as_of - pert.start_at).total_seconds() / 3600
+    assert pert.rise_duration_hours == int(lead_hours), (
+        "rise_duration_hours must span start_at..as_of"
+    )
+
+    # Recompute baseline σ for the paired machine over [as_of-30d, as_of).
+    raw = Path(__file__).parents[1] / "data" / "raw" / "PdM_telemetry.csv"
+    end = act.as_of
+    start = end - timedelta(days=30)
+    vals = []
+    with raw.open() as f:
+        for row in csv.DictReader(f):
+            if int(row["machineID"]) != act.machine_id:
+                continue
+            from datetime import datetime
+            dt = datetime.strptime(row["datetime"], "%Y-%m-%d %H:%M:%S")
+            if start <= dt < end:
+                vals.append(float(row["vibration"]))
+    sigma = statistics.stdev(vals)
+    total_rise_sd = pert.rise_rate_per_hour * pert.rise_duration_hours / sigma
+    assert abs(total_rise_sd - 2.0) < 0.01, (
+        f"total rise {total_rise_sd:.3f}σ, expected 2.0σ"
+    )
+
+
+def test_f2_act_has_timestamps_abstain_does_not(generated):
+    """ADR 0006 timestamps: act carries anomaly_onset+PONR, abstain stays null."""
+    act, abstain = _f2_pair(generated)
+    assert act.timestamps is not None
+    assert act.timestamps.anomaly_onset == act.perturbation.start_at
+    assert act.timestamps.point_of_no_return == act.as_of
+    assert abstain.timestamps is None
 
 
 def test_f2_pair_as_of_in_normal_window(generated):
