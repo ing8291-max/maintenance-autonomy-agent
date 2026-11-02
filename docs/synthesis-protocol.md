@@ -64,9 +64,9 @@ F2 쌍은 **고장이 없는 창**(as_of 앞뒤 7일 안에 고장 기록이 전
 - **선행시간(lead)**: `start_at → implied_failure`. dev 머신 실측(35~47h 분포, 아래 표)에서 뽑는다. 이 숫자는 "전조 시작부터 실제 고장까지"를 의미하지, "전조 시작부터 관찰 시각까지"가 아니다.
 - **start_at 오프셋**: `as_of − 6h ~ as_of − 18h`. 에이전트가 보는 창에서 전조는 아직 **일부만 자란 상태**다.
 - **implied_failure = start_at + lead**. SCHEDULE_PM 정답이 성립하려면 **implied_failure ≥ as_of + 24h**(테스트 `test_f2_act_implied_failure_at_least_24h_after_as_of`로 강제). 생성기는 `lead ≥ offset + 24` 를 보장해 뽑는다.
-- **rise_rate_per_hour = 2·σ_vib / lead** (즉 implied_failure 에서 총 +2σ 상승). as_of 시점의 노출량은 `(2·offset / lead) σ` — offset=6, lead=47 이면 0.26σ, offset=18, lead=42 이면 0.86σ. 즉 **에이전트는 '서서히 뜨고 있는 중'인 신호를 본다**.
-- **동반 신호**: `correlated_sensor=rotate` 가 **같은 `[start_at, implied_failure]` 창에서** `−1.5·σ_rotate` 만큼 선형으로 떠내려감. 30일 베이스라인 전체에 걸치는 변화가 아니다 — 베이스라인은 σ를 재는 데만 쓰고, 드리프트는 주입 창 안에서만 산다.
-- **ADR 0006 세 시점**: `anomaly_onset=start_at`, `first_observable=start_at`(주입 즉시 보임), `point_of_no_return = implied_failure − 12h`. PONR 은 반드시 `as_of` 보다 뒤에 있어야 한다(테스트 `test_f2_act_has_timestamps_abstain_does_not`).
+- **rise_rate_per_hour = 2.5·σ_vib / lead** (즉 implied_failure 에서 총 +2.5σ 상승). as_of 시점의 노출량은 `(2.5·offset / lead) σ` — offset=6, lead=47 이면 0.32σ, offset=18, lead=42 이면 1.07σ. 즉 **에이전트는 '서서히 뜨고 있는 중'인 신호를 본다**. 2.5σ 라는 숫자는 임의가 아니다 — 아래 § F2 전조 크기 실측에서 재조정했다.
+- **동반 신호**: `correlated_sensor=rotate` 가 **같은 `[start_at, implied_failure]` 창에서** `−2.75·σ_rotate` 만큼 선형으로 떠내려감. 30일 베이스라인 전체에 걸치는 변화가 아니다 — 베이스라인은 σ를 재는 데만 쓰고, 드리프트는 주입 창 안에서만 산다. 이 계수도 실측(§ F2 전조 크기 실측)에 맞춰 조정했다.
+- **ADR 0006 세 시점**: `anomaly_onset=start_at`, `first_observable=start_at`(주입 즉시 보임), `point_of_no_return = implied_failure − 12h`. PONR 은 반드시 `as_of` 보다 뒤에 있어야 한다(테스트 `test_f2_act_has_timestamps_abstain_does_not`). **−12h 는 "PM 을 세우고 준비하는 데 걸리는 리드타임" 가정이다**. 운영상 PM 준비 시간이 달라지면 이 상수를 그에 맞춰 조정한다 (`_F2_PONR_HOURS_BEFORE_FAILURE`).
 
 ### sensor_stuck (센서 고장)
 - vibration이 `start_at`(기본 `as_of − 18h`)부터 `stuck_at`(베이스라인 평균) 값에 **그대로 굳는다**. 분산이 사라지는 모양.
@@ -75,11 +75,35 @@ F2 쌍은 **고장이 없는 창**(as_of 앞뒤 7일 안에 고장 기록이 전
 - (대안형: `sensor_spike` — 단일 틱이 베이스라인 평균에서 `spike_delta`만큼 혼자 튐. 지금 기본 쌍에는 쓰지 않지만 스키마는 지원.)
 
 ### 베이스라인은 어디서 재나
-`as_of` 바로 앞 30일 창(`[as_of − 30d, as_of)`)에서 **쌍을 만드는 그 설비 자체**의 각 센서 평균·표준편차를 계산한다. μ·σ는 전역 상수가 아니라 매번 머신 ID 기준으로 다시 계산된다(생성기 `_sensor_stats`가 담당, 테스트 `test_f2_act_total_rise_is_two_sigma`가 쌍 머신 기준 2σ 상승을 확인). 이 값이 `stuck_at`·`rise_rate_per_hour`·`correlated_delta`의 근거다.
+`as_of` 바로 앞 30일 창(`[as_of − 30d, as_of)`)에서 **쌍을 만드는 그 설비 자체**의 각 센서 평균·표준편차를 계산한다. μ·σ는 전역 상수가 아니라 매번 머신 ID 기준으로 다시 계산된다(생성기 `_sensor_stats`가 담당, 테스트 `test_f2_act_rise_rate_targets_tuned_sigma_at_implied_failure`가 쌍 머신 기준 총 상승이 튜닝된 2.5σ 를 벗어나지 않는지 확인). 이 값이 `stuck_at`·`rise_rate_per_hour`·`correlated_delta`의 근거다.
+
+### F2 전조 크기 실측 (dev 머신 전체 고장)
+
+합성 전조가 "현실스러워 보이는가"를 측정으로 묶어 둔다. dev 분할 머신 485건의 고장을 대상으로, **각 고장의 24~48h 앞 창** 센서 값을 **그 고장의 베이스라인 μ·σ**(앞 30일, 72h 가드)로 표준화한 뒤, 창 내부 `|z|` 의 **고장별 중앙값**을 모았다. 그 중앙값들의 분포 (per-failure median `|z|`):
+
+| 센서 | Q1 | 중앙값 | Q3 |
+|---|---|---|---|
+| vibration | 0.591 | **0.742** | 1.389 |
+| rotate    | 0.604 | **0.810** | 1.418 |
+| pressure  | 0.564 | 0.690 | 0.932 |
+| volt      | 0.601 | 0.748 | 1.020 |
+
+즉, 실제 고장 24~48h 전 창에서 센서가 평균적으로 중앙값 기준 ~0.74σ (vib) 수준으로 떠 있다.
+
+**합성 쪽 재조정.** 이전 버전은 `_F2_PRECURSOR_RISE_SD = 2.0`, `_F2_CORRELATED_DELTA_SD = −1.5` 였다. 전형적인 seed=42 조합(offset=12h, lead=40h)에서 as_of 노출은 vib 약 **0.60σ**, rotate 약 **−0.45σ** — vib 중앙값(0.74)·rotate 중앙값(0.81)보다 **눈에 띄게 작다**. 이 상태로는 F2 act 가 "실제 전조"라고 주장하기 어렵다.
+
+재조정 후:
+
+| 상수 | 이전 | 지금 | 근거 |
+|---|---|---|---|
+| `_F2_PRECURSOR_RISE_SD` | 2.0 | **2.5** | vib 중앙값 0.74σ 에 맞춤. offset/lead=12/40 에서 노출 = 2.5·12/40 = **0.75σ** |
+| `_F2_CORRELATED_DELTA_SD` | −1.5 | **−2.75** | rotate 중앙값 −0.81σ 에 맞춤. 같은 조합에서 노출 = −2.75·12/40 = **−0.825σ** |
+
+튜닝의 의미는 "as_of 시점에 에이전트가 보는 전조 크기가 실측 분포의 **중앙값 근처**에 떨어진다"는 것이지, Q1·Q3 를 다 커버한다는 뜻이 아니다. 더 미세한 쌍(Q1 근처의 조용한 전조)이나 더 거친 쌍(Q3 근처의 뚜렷한 전조)은 lead/offset 뽑기로 자연스럽게 생겨난다 — offset=6, lead=47 조합이면 vib 노출 ≈ 0.32σ(Q1 근처), offset=18, lead=42 면 ≈ 1.07σ(Q3 근처). 상수를 중앙값에 걸어 두고 lead/offset 분산이 꼬리를 생성하도록 한다.
 
 ### 개발용 설비에서 측정한 값 (예시: 머신 20, seed=42)
 
-아래 숫자는 **예시**다. 다른 머신·다른 seed 조합에서는 as_of 가 달라지고 μ·σ 도 달라진다. 중요한 것은 두 가지뿐: (a) 각 쌍은 짝지은 설비의 자기 μ·σ 를 기준으로 생성된다, (b) 상승량은 언제나 2σ 다.
+아래 숫자는 **예시**다. 다른 머신·다른 seed 조합에서는 as_of 가 달라지고 μ·σ 도 달라진다. 중요한 것은 두 가지뿐: (a) 각 쌍은 짝지은 설비의 자기 μ·σ 를 기준으로 생성된다, (b) 상승량은 언제나 **implied_failure 에서 2.5σ** 다 (중앙값 매칭, § F2 전조 크기 실측).
 
 seed=42로 돌리면 F2 쌍이 머신 20의 `as_of = 2015-04-27 14:00:00`에 놓인다. 그 시점 바로 앞 30일(=720시간)의 베이스라인은:
 
@@ -93,10 +117,10 @@ seed=42로 돌리면 F2 쌍이 머신 20의 `as_of = 2015-04-27 14:00:00`에 놓
 rng 가 뽑은 값: `start_at_offset = 12h`, `lead = 40h`. 결과:
 - `start_at = 2015-04-27 02:00:00` (as_of − 12h)
 - `implied_failure = 2015-04-28 18:00:00` (as_of + 28h, 24h 가드 통과)
-- `rise_duration_hours = 40`, `rise_rate_per_hour = round(2·5.39/40, 4) = 0.2693`
-- implied_failure 에서 총 상승 = 40 × 0.2693 ≈ **+10.77 (≈ 2σ)**
-- **as_of 에서 지금까지 쌓인 상승 ≈ 0.60σ** (12/40 × 2σ = 3.23 ≈ 0.60σ)
-- `correlated_delta = round(−1.5·50.56, 2) = −75.84` (rotate, `[start_at, implied_failure]` 창 내부에서만)
+- `rise_duration_hours = 40`, `rise_rate_per_hour = round(2.5·5.39/40, 4) = 0.3366`
+- implied_failure 에서 총 상승 = 40 × 0.3366 ≈ **+13.46 (≈ 2.5σ)**
+- **as_of 에서 지금까지 쌓인 상승 ≈ 0.75σ** (12/40 × 2.5σ = 0.75σ, 실측 vib 중앙값 0.74σ와 거의 일치)
+- `correlated_delta = round(−2.75·50.56, 2) = −139.04` (rotate, `[start_at, implied_failure]` 창 내부에서만). as_of 시점 rotate 노출 ≈ −0.825σ (실측 rotate 중앙값 −0.81σ와 거의 일치)
 - `PONR = 2015-04-28 06:00:00` (implied − 12h, as_of 보다 16h 뒤)
 - abstain: `stuck_at = round(40.68, 2) = 40.68`, `start_at = as_of − 18h = 2015-04-26 20:00:00`
 

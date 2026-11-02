@@ -53,12 +53,16 @@ _F2_START_AT_OFFSET_MAX_HOURS = 18
 # Guard: implied_failure must be at least this far after as_of so that
 # SCHEDULE_PM is still a legitimate "schedule, don't rush" answer.
 _F2_MIN_IMPLIED_FAILURE_GAP_HOURS = 24
-# Total rise of vibration from start_at to implied_failure, in σ.
-_F2_PRECURSOR_RISE_SD = 2.0
+# Total rise of vibration from start_at to implied_failure, in σ. Tuned so
+# that at a typical seed=42 offset/lead (12h/40h), the as_of exposure lands
+# near the measured per-failure median of 0.74σ on dev machines (24-48h
+# pre-failure window; see docs/synthesis-protocol.md § F2 precursor realism).
+_F2_PRECURSOR_RISE_SD = 2.5
 # Correlated drift of rotate across the SAME [start_at, implied_failure]
-# window, in σ units. Not the 30-day baseline — the baseline is only used
-# to measure σ; the drift lives inside the injection window.
-_F2_CORRELATED_DELTA_SD = -1.5
+# window, in σ units. Tuned so as_of exposure ≈ measured rotate median
+# (−0.81σ). Not the 30-day baseline — the baseline is only used to measure
+# σ; the drift lives inside the injection window.
+_F2_CORRELATED_DELTA_SD = -2.75
 _F2_STUCK_LEAD_HOURS = 18
 _F2_PONR_HOURS_BEFORE_FAILURE = 12
 

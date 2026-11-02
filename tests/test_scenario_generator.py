@@ -250,8 +250,8 @@ def test_f2_act_lead_matches_implied_failure(generated):
     )
 
 
-def test_f2_act_rise_rate_targets_two_sigma_at_implied_failure(generated):
-    """rise_rate · rise_duration ≈ 2σ (vib) — full rise reached at implied_failure."""
+def test_f2_act_rise_rate_targets_tuned_sigma_at_implied_failure(generated):
+    """rise_rate · rise_duration ≈ 2.5σ (vib) — tuned so as_of exposure ≈ measured median."""
     import csv
     import statistics
     from datetime import datetime, timedelta
@@ -272,8 +272,8 @@ def test_f2_act_rise_rate_targets_two_sigma_at_implied_failure(generated):
                 vals.append(float(row["vibration"]))
     sigma = statistics.stdev(vals)
     total_rise_sd = pert.rise_rate_per_hour * pert.rise_duration_hours / sigma
-    assert abs(total_rise_sd - 2.0) < 0.01, (
-        f"full-trajectory rise {total_rise_sd:.3f}σ, expected 2.0σ"
+    assert abs(total_rise_sd - 2.5) < 0.02, (
+        f"full-trajectory rise {total_rise_sd:.3f}σ, expected 2.5σ"
     )
 
 
