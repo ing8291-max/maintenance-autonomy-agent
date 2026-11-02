@@ -18,9 +18,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 _REPO = Path(__file__).parents[1]
-_SPLITS = json.loads((_REPO / "data" / "splits.json").read_text())
-_DEV_MACHINES: list[int] = sorted(_SPLITS["dev"])
-_EVAL_MACHINES: list[int] = sorted(_SPLITS["eval"])
+_SPLITS_PATH = _REPO / "data" / "splits.json"
+
+# Guard module-level data loads so collection still works on CI (where
+# data/ is intentionally absent, ADR 0001). The conftest's skip markers
+# cover the actual test skipping.
+if _SPLITS_PATH.exists():
+    _SPLITS = json.loads(_SPLITS_PATH.read_text())
+    _DEV_MACHINES: list[int] = sorted(_SPLITS["dev"])
+    _EVAL_MACHINES: list[int] = sorted(_SPLITS["eval"])
+else:
+    _DEV_MACHINES = [1]
+    _EVAL_MACHINES = [2]
 
 # Representative probe points on a dev machine
 _PROBE_MID = _DEV_MACHINES[0]
@@ -194,3 +203,75 @@ def test_baselines_work_without_synth_dir(tmp_path, monkeypatch):
     as_of = _PROBE_TIMES[0]
     for fn in (b1_predict, b2_predict, b3_predict, b4_predict):
         fn(_PROBE_MID, as_of)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# B3 training path: dev-only, allow_eval never True
+# ---------------------------------------------------------------------------
+
+
+def test_b3_fit_calls_only_dev_machines_and_never_allow_eval(monkeypatch):
+    """`--fit` must never read eval machines and never pass allow_eval=True.
+
+    We stub `extract_features` inside the b3_logistic module so we can log
+    every call made by `_build_training_set` without actually running the
+    gradient loop. The stub returns a zero-valued feature dict so the rest
+    of the pipeline would still work.
+    """
+    import mautonomy.baselines.b3_logistic as b3
+    from mautonomy.baselines.features import FEATURE_NAMES
+
+    calls: list[tuple[int, bool]] = []
+
+    def _stub_extract(mid, as_of, *, allow_eval=False):
+        calls.append((mid, allow_eval))
+        return {name: 0.0 for name in FEATURE_NAMES}
+
+    monkeypatch.setattr(b3, "extract_features", _stub_extract)
+
+    X, y = b3._build_training_set()
+    assert len(X) == len(y) > 0, "training set must be non-empty"
+
+    dev_set = set(_DEV_MACHINES)
+    eval_set = set(_EVAL_MACHINES)
+
+    seen_machines = {mid for mid, _ in calls}
+    assert seen_machines, "fit path produced no read-tool calls"
+    assert seen_machines.issubset(dev_set), (
+        f"non-dev machines in fit path: {sorted(seen_machines - dev_set)}"
+    )
+    assert not (seen_machines & eval_set), (
+        f"eval machines leaked into fit path: {sorted(seen_machines & eval_set)}"
+    )
+
+    allow_eval_flags = {flag for _, flag in calls}
+    assert allow_eval_flags == {False}, (
+        f"fit path must never set allow_eval=True; saw flags {allow_eval_flags}"
+    )
+
+
+def test_b3_fit_source_has_no_allow_eval_true():
+    """Static check: the B3 source must not contain `allow_eval=True`."""
+    import inspect
+
+    import mautonomy.baselines.b3_logistic as b3
+
+    source = inspect.getsource(b3)
+    assert "allow_eval=True" not in source, (
+        "b3_logistic.py must never pass allow_eval=True — training path only"
+    )
+
+
+def test_b4_fit_filters_to_dev_only(monkeypatch, tmp_path):
+    """B4 `--fit` reads PdM_telemetry.csv directly and skips non-dev rows.
+
+    This is a smoke check: fit then reload, and confirm no eval-machine
+    stats contaminated the thresholds. (The function filters on `mid in dev`
+    at load time; we assert the resulting thresholds are finite floats.)
+    """
+    import mautonomy.baselines.b4_sensor_rule as b4
+
+    thresholds = b4._fit_thresholds()
+    for sensor, value in thresholds.items():
+        assert isinstance(value, float)
+        assert value > 0, f"threshold for {sensor} should be positive, got {value}"

@@ -13,9 +13,16 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 _REPO_ROOT = Path(__file__).parents[1]
-_SPLITS = json.loads((_REPO_ROOT / "data" / "splits.json").read_text())
-_DEV_MACHINES: list[int] = _SPLITS["dev"]
-_EVAL_MACHINES: list[int] = _SPLITS["eval"]
+_SPLITS_PATH = _REPO_ROOT / "data" / "splits.json"
+# Guard module-level load so collection still works on CI without data/
+# (ADR 0001). The conftest skips every test here when raw data is absent.
+if _SPLITS_PATH.exists():
+    _SPLITS = json.loads(_SPLITS_PATH.read_text())
+    _DEV_MACHINES: list[int] = _SPLITS["dev"]
+    _EVAL_MACHINES: list[int] = _SPLITS["eval"]
+else:
+    _DEV_MACHINES = [1]
+    _EVAL_MACHINES = [2]
 
 _DATA_START = datetime(2015, 1, 1)
 _DATA_END = datetime(2016, 1, 1)

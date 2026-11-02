@@ -24,8 +24,14 @@ _EVAL_MACHINES: set[int] | None = None
 def _get_eval_machines() -> set[int]:
     global _EVAL_MACHINES
     if _EVAL_MACHINES is None:
-        splits = json.loads(_SPLITS_JSON.read_text())
-        _EVAL_MACHINES = set(splits["eval"])
+        if _SPLITS_JSON.exists():
+            splits = json.loads(_SPLITS_JSON.read_text())
+            _EVAL_MACHINES = set(splits["eval"])
+        else:
+            # No split manifest → no eval set defined, so no machine to
+            # guard. This path only triggers on CI where data/ is absent
+            # (ADR 0001). Locally, splits.json is always generated first.
+            _EVAL_MACHINES = set()
     return _EVAL_MACHINES
 
 

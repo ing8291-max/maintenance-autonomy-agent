@@ -18,8 +18,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 _REPO_ROOT = Path(__file__).parents[1]
-_SPLITS = json.loads((_REPO_ROOT / "data" / "splits.json").read_text())
-_EVAL_MACHINES: set[int] = set(_SPLITS["eval"])
+_SPLITS_PATH = _REPO_ROOT / "data" / "splits.json"
+# Guard module-level load so collection still works on CI without data/
+# (ADR 0001). The conftest skips every test here when raw data is absent.
+if _SPLITS_PATH.exists():
+    _SPLITS = json.loads(_SPLITS_PATH.read_text())
+    _EVAL_MACHINES: set[int] = set(_SPLITS["eval"])
+else:
+    _EVAL_MACHINES = set()
 
 _CAUSAL_FIELDS = frozenset(
     ["scenario_type", "machine_id", "split", "as_of", "seed",

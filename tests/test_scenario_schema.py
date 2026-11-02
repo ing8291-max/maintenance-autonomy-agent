@@ -19,9 +19,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 _REPO_ROOT = Path(__file__).parents[1]
-_SPLITS = json.loads((_REPO_ROOT / "data" / "splits.json").read_text())
-_DEV_MACHINES: list[int] = _SPLITS["dev"]
-_EVAL_MACHINES: list[int] = _SPLITS["eval"]
+_SPLITS_PATH = _REPO_ROOT / "data" / "splits.json"
+# Guard module-level load so pure-schema tests still collect on CI
+# without data/ (ADR 0001). The conftest skips the two tests that
+# actually need real split IDs.
+if _SPLITS_PATH.exists():
+    _SPLITS = json.loads(_SPLITS_PATH.read_text())
+    _DEV_MACHINES: list[int] = _SPLITS["dev"]
+    _EVAL_MACHINES: list[int] = _SPLITS["eval"]
+else:
+    _DEV_MACHINES = [1]
+    _EVAL_MACHINES = [2]
 
 _DT_FMT = "%Y-%m-%d %H:%M:%S"
 
