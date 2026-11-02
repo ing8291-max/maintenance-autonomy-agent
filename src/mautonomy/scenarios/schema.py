@@ -20,7 +20,7 @@ ActionType = Literal["NO_ACTION", "SCHEDULE_PM", "ESCALATE", "CHECK_SENSOR", "RE
 ScenarioType = Literal["normal", "pre_failure_24_48h", "pre_failure_0_24h", "hardcase"]
 SplitType = Literal["dev", "eval"]
 PairRole = Literal["act", "abstain"]
-HardcaseFamily = Literal["F1", "F2", "F3", "F4", "F5"]
+HardcaseFamily = Literal["F1", "F2", "F3", "F4"]
 PerturbationKind = Literal["precursor_rise", "sensor_stuck", "sensor_spike"]
 
 _VALID_ACTIONS: frozenset[str] = frozenset(
@@ -29,7 +29,7 @@ _VALID_ACTIONS: frozenset[str] = frozenset(
 _VALID_SCENARIO_TYPES: frozenset[str] = frozenset(
     ["normal", "pre_failure_24_48h", "pre_failure_0_24h", "hardcase"]
 )
-_VALID_FAMILIES: frozenset[str] = frozenset(["F1", "F2", "F3", "F4", "F5"])
+_VALID_FAMILIES: frozenset[str] = frozenset(["F1", "F2", "F3", "F4"])
 _VALID_KINDS: frozenset[str] = frozenset(["precursor_rise", "sensor_stuck", "sensor_spike"])
 
 
