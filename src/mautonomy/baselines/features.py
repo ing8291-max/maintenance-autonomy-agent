@@ -1,8 +1,7 @@
-"""Feature extraction from as_of-aware read tools (shared by B3 and B4).
+"""Feature extraction from a ``ScenarioEnvironment`` (shared by B3 and B4).
 
-All features are a function of (machine_id, as_of) through the read-tool
-interface only. No scenario YAML is consulted here. The eval guard is
-inherited from the read tools — pass allow_eval only during final eval runs.
+Every feature is a function of what the four scoped read tools return.
+No scenario YAML is consulted here; the environment hides it.
 """
 from __future__ import annotations
 
@@ -10,11 +9,7 @@ import statistics
 from datetime import datetime, timedelta
 from typing import Any
 
-from mautonomy.data.read_tools import (
-    read_errors,
-    read_maintenance_history,
-    read_telemetry,
-)
+from mautonomy.harness import ScenarioEnvironment
 
 SENSOR_FIELDS = ("volt", "rotate", "pressure", "vibration")
 ERROR_IDS = ("error1", "error2", "error3", "error4", "error5")
@@ -90,18 +85,16 @@ def _any_error_in_last_24h(
     return any(cutoff < r["datetime"] <= as_of for r in rows)
 
 
-def extract_features(
-    machine_id: int, as_of: datetime, *, allow_eval: bool = False
-) -> dict[str, float]:
-    """Return the full feature dict (sensor stats + error counts + maint recency)."""
-    telem = read_telemetry(machine_id, as_of, allow_eval=allow_eval)
-    errs = read_errors(machine_id, as_of, allow_eval=allow_eval)
-    maint = read_maintenance_history(machine_id, as_of, allow_eval=allow_eval)
+def extract_features(env: ScenarioEnvironment) -> dict[str, float]:
+    """Full feature dict (sensor stats + error counts + maintenance recency)."""
+    telem = env.read_telemetry()
+    errs = env.read_errors()
+    maint = env.read_maintenance_history()
 
     feats: dict[str, float] = {}
-    feats.update(_telemetry_stats(telem, as_of))
-    feats.update(_error_counts(errs, as_of))
-    feats.update(_maintenance_recency(maint, as_of))
+    feats.update(_telemetry_stats(telem, env.as_of))
+    feats.update(_error_counts(errs, env.as_of))
+    feats.update(_maintenance_recency(maint, env.as_of))
     return feats
 
 
@@ -119,21 +112,16 @@ def feature_vector(feats: dict[str, float]) -> list[float]:
     return [feats[name] for name in FEATURE_NAMES]
 
 
-def b4_signals(
-    machine_id: int, as_of: datetime, *, allow_eval: bool = False
-) -> tuple[dict[str, float], bool]:
-    """B4-specific: return (sensor_means_last_24h, any_error_in_last_24h).
+def b4_signals(env: ScenarioEnvironment) -> tuple[dict[str, float], bool]:
+    """B4-specific: return (24h sensor means, any_error_in_last_24h)."""
+    telem = env.read_telemetry()
+    errs = env.read_errors()
 
-    Returns the 24h-mean per sensor and a flag for recent error presence.
-    """
-    telem = read_telemetry(machine_id, as_of, allow_eval=allow_eval)
-    errs = read_errors(machine_id, as_of, allow_eval=allow_eval)
-
-    cutoff = as_of - timedelta(hours=24)
-    window = [r for r in telem if cutoff < r["datetime"] <= as_of]
+    cutoff = env.as_of - timedelta(hours=24)
+    window = [r for r in telem if cutoff < r["datetime"] <= env.as_of]
     means: dict[str, float] = {}
     for sensor in SENSOR_FIELDS:
         vals = [r[sensor] for r in window]
         means[sensor] = statistics.mean(vals) if vals else 0.0
 
-    return means, _any_error_in_last_24h(errs, as_of)
+    return means, _any_error_in_last_24h(errs, env.as_of)

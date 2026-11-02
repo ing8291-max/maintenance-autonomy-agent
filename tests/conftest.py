@@ -32,6 +32,7 @@ BASELINE_MODELS_AVAILABLE = all((_MODELS / f).exists() for f in _BASELINE_MODEL_
 _AZURE_ONLY_MODULES = {
     "test_scenario_generator",
     "test_as_of_leak",
+    "test_scenario_environment",
 }
 
 # Specific test IDs in otherwise-pure modules that still need Azure data.

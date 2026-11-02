@@ -44,13 +44,23 @@ _VALID_ACTIONS = {"NO_ACTION", "CHECK_SENSOR", "ESCALATE", "SCHEDULE_PM", "REQUE
 
 @pytest.fixture(params=["b1", "b2", "b3", "b4"])
 def baseline(request):
+    """Legacy (mid, as_of) wrapper: builds a raw env, then calls predict."""
     from mautonomy.baselines import b1_predict, b2_predict, b3_predict, b4_predict
-    return {
+    from mautonomy.harness import build_raw_environment
+    pred = {
         "b1": b1_predict,
         "b2": b2_predict,
         "b3": b3_predict,
         "b4": b4_predict,
     }[request.param]
+
+    def _call(mid, as_of, *, allow_eval=False):
+        env = build_raw_environment(mid, as_of, allow_eval=allow_eval)
+        return pred(env)
+
+    _call.__name__ = f"{request.param}_envwrap"
+    _call.predict_module = pred.__module__
+    return _call
 
 
 # ---------------------------------------------------------------------------
@@ -74,30 +84,35 @@ def test_confidence_is_none_or_in_unit_interval(baseline):
         )
 
 
+def _env(mid, as_of, *, allow_eval=False):
+    from mautonomy.harness import build_raw_environment
+    return build_raw_environment(mid, as_of, allow_eval=allow_eval)
+
+
 def test_b1_always_escalates():
     from mautonomy.baselines import b1_predict
     for as_of in _PROBE_TIMES:
-        assert b1_predict(_PROBE_MID, as_of).action == "ESCALATE"
+        assert b1_predict(_env(_PROBE_MID, as_of)).action == "ESCALATE"
 
 
 def test_b2_always_schedules_pm():
     from mautonomy.baselines import b2_predict
     for as_of in _PROBE_TIMES:
-        assert b2_predict(_PROBE_MID, as_of).action == "SCHEDULE_PM"
+        assert b2_predict(_env(_PROBE_MID, as_of)).action == "SCHEDULE_PM"
 
 
 def test_b1_b2_have_null_confidence():
     from mautonomy.baselines import b1_predict, b2_predict
     for as_of in _PROBE_TIMES:
-        assert b1_predict(_PROBE_MID, as_of).confidence is None
-        assert b2_predict(_PROBE_MID, as_of).confidence is None
+        assert b1_predict(_env(_PROBE_MID, as_of)).confidence is None
+        assert b2_predict(_env(_PROBE_MID, as_of)).confidence is None
 
 
 def test_b3_reports_calibrated_confidence():
     """B3 is LR — confidence is the predicted probability, never None."""
     from mautonomy.baselines import b3_predict
     for as_of in _PROBE_TIMES:
-        out = b3_predict(_PROBE_MID, as_of)
+        out = b3_predict(_env(_PROBE_MID, as_of))
         assert out.confidence is not None
         assert 0.0 <= out.confidence <= 1.0
 
@@ -109,7 +124,7 @@ def test_b3_action_follows_threshold():
 
     threshold = _load_model()["threshold"]
     for as_of in _PROBE_TIMES:
-        out = b3_predict(_PROBE_MID, as_of)
+        out = b3_predict(_env(_PROBE_MID, as_of))
         expected = "SCHEDULE_PM" if out.confidence >= threshold else "NO_ACTION"
         assert out.action == expected
 
@@ -117,7 +132,7 @@ def test_b3_action_follows_threshold():
 def test_b4_only_proposes_pm_or_no_action():
     from mautonomy.baselines import b4_predict
     for as_of in _PROBE_TIMES:
-        assert b4_predict(_PROBE_MID, as_of).action in {"SCHEDULE_PM", "NO_ACTION"}
+        assert b4_predict(_env(_PROBE_MID, as_of)).action in {"SCHEDULE_PM", "NO_ACTION"}
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +153,8 @@ def test_determinism_across_fresh_import(tmp_path, monkeypatch):
     from mautonomy.baselines import b4_predict as b4_a
 
     as_of = _PROBE_TIMES[0]
-    a3 = b3_a(_PROBE_MID, as_of)
-    a4 = b4_a(_PROBE_MID, as_of)
+    a3 = b3_a(_env(_PROBE_MID, as_of))
+    a4 = b4_a(_env(_PROBE_MID, as_of))
 
     # Force cache reset
     import mautonomy.baselines.b3_logistic as m3
@@ -147,8 +162,8 @@ def test_determinism_across_fresh_import(tmp_path, monkeypatch):
     monkeypatch.setattr(m3, "_CACHE", None)
     monkeypatch.setattr(m4, "_CACHE", None)
 
-    b3 = m3.predict(_PROBE_MID, as_of)
-    b4 = m4.predict(_PROBE_MID, as_of)
+    b3 = m3.predict(_env(_PROBE_MID, as_of))
+    b4 = m4.predict(_env(_PROBE_MID, as_of))
     assert a3 == b3
     assert a4 == b4
 
@@ -187,7 +202,7 @@ def test_baselines_do_not_import_scenarios_schema_at_runtime(baseline):
     import importlib
     import inspect
 
-    mod = importlib.import_module(baseline.__module__)
+    mod = importlib.import_module(baseline.predict_module)
     source = inspect.getsource(mod)
     for forbidden in ("ground_truth", "perturbation", "load_scenario"):
         assert forbidden not in source, (
@@ -202,7 +217,7 @@ def test_baselines_work_without_synth_dir(tmp_path, monkeypatch):
     from mautonomy.baselines import b1_predict, b2_predict, b3_predict, b4_predict
     as_of = _PROBE_TIMES[0]
     for fn in (b1_predict, b2_predict, b3_predict, b4_predict):
-        fn(_PROBE_MID, as_of)  # must not raise
+        fn(_env(_PROBE_MID, as_of))  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -211,22 +226,33 @@ def test_baselines_work_without_synth_dir(tmp_path, monkeypatch):
 
 
 def test_b3_fit_calls_only_dev_machines_and_never_allow_eval(monkeypatch):
-    """`--fit` must never read eval machines and never pass allow_eval=True.
+    """`--fit` must never build an env on an eval machine or with allow_eval=True.
 
-    We stub `extract_features` inside the b3_logistic module so we can log
-    every call made by `_build_training_set` without actually running the
-    gradient loop. The stub returns a zero-valued feature dict so the rest
-    of the pipeline would still work.
+    Stubs ``build_raw_environment`` and ``extract_features`` inside the
+    b3_logistic module so we can log every (machine_id, allow_eval) pair
+    the training path emits without actually running the gradient loop.
     """
     import mautonomy.baselines.b3_logistic as b3
     from mautonomy.baselines.features import FEATURE_NAMES
+    from mautonomy.harness import ScenarioEnvironment
 
     calls: list[tuple[int, bool]] = []
 
-    def _stub_extract(mid, as_of, *, allow_eval=False):
+    def _stub_build_env(mid, as_of, *, allow_eval=False):
         calls.append((mid, allow_eval))
+        return ScenarioEnvironment(
+            machine_id=mid,
+            as_of=as_of,
+            read_telemetry=lambda: [],
+            read_errors=lambda: [],
+            read_maintenance_history=lambda: [],
+            read_failure_history=lambda: [],
+        )
+
+    def _stub_extract(env):
         return {name: 0.0 for name in FEATURE_NAMES}
 
+    monkeypatch.setattr(b3, "build_raw_environment", _stub_build_env)
     monkeypatch.setattr(b3, "extract_features", _stub_extract)
 
     X, y = b3._build_training_set()
@@ -236,7 +262,7 @@ def test_b3_fit_calls_only_dev_machines_and_never_allow_eval(monkeypatch):
     eval_set = set(_EVAL_MACHINES)
 
     seen_machines = {mid for mid, _ in calls}
-    assert seen_machines, "fit path produced no read-tool calls"
+    assert seen_machines, "fit path produced no env builds"
     assert seen_machines.issubset(dev_set), (
         f"non-dev machines in fit path: {sorted(seen_machines - dev_set)}"
     )

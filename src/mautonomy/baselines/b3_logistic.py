@@ -32,6 +32,7 @@ from mautonomy.baselines.features import (
     extract_features,
     feature_vector,
 )
+from mautonomy.harness import ScenarioEnvironment, build_raw_environment
 
 _MODELS_DIR = Path(__file__).parents[3] / "data" / "models"
 _MODEL_PATH = _MODELS_DIR / "b3_lr.json"
@@ -72,11 +73,9 @@ def _predict_proba(x: list[float], model: dict[str, Any]) -> float:
     return _sigmoid(z)
 
 
-def predict(
-    machine_id: int, as_of: datetime, *, allow_eval: bool = False
-) -> BaselineOutput:
+def predict(env: ScenarioEnvironment) -> BaselineOutput:
     model = _load_model()
-    feats = extract_features(machine_id, as_of, allow_eval=allow_eval)
+    feats = extract_features(env)
     x = feature_vector(feats)
     prob = _predict_proba(x, model)
     action = "SCHEDULE_PM" if prob >= model["threshold"] else "NO_ACTION"
@@ -159,11 +158,13 @@ def _build_training_set(
         neg = neg_pool[:n_neg]
 
         for as_of in pos:
-            feats = extract_features(mid, as_of, allow_eval=False)
+            env = build_raw_environment(mid, as_of, allow_eval=False)
+            feats = extract_features(env)
             X.append(feature_vector(feats))
             y.append(1)
         for as_of in neg:
-            feats = extract_features(mid, as_of, allow_eval=False)
+            env = build_raw_environment(mid, as_of, allow_eval=False)
+            feats = extract_features(env)
             X.append(feature_vector(feats))
             y.append(0)
 

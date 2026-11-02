@@ -17,6 +17,7 @@ from pathlib import Path
 
 from mautonomy.baselines.base import BaselineOutput
 from mautonomy.baselines.features import SENSOR_FIELDS, b4_signals
+from mautonomy.harness import ScenarioEnvironment
 
 _MODELS_DIR = Path(__file__).parents[3] / "data" / "models"
 _THRESHOLDS_PATH = _MODELS_DIR / "b4_thresholds.json"
@@ -39,11 +40,9 @@ def _load_thresholds() -> dict[str, float]:
     return _CACHE
 
 
-def predict(
-    machine_id: int, as_of: datetime, *, allow_eval: bool = False
-) -> BaselineOutput:
+def predict(env: ScenarioEnvironment) -> BaselineOutput:
     thresholds = _load_thresholds()
-    means, any_err = b4_signals(machine_id, as_of, allow_eval=allow_eval)
+    means, any_err = b4_signals(env)
     exceeded = any(means[s] >= thresholds[s] for s in SENSOR_FIELDS)
     if exceeded or any_err:
         return BaselineOutput(action="SCHEDULE_PM", confidence=None)
