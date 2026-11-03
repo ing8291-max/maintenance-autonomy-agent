@@ -237,15 +237,23 @@ class FakeAdapter:
         else:
             resp = self.scripted.get(last_user, self.default)
         if resp.model == "":
+            usage = resp.usage or {
+                "input_tokens": len(last_user),
+                "output_tokens": len(resp.text or ""),
+                "total_tokens": len(last_user) + len(resp.text or ""),
+            }
+            cost = resp.cost_usd
+            if cost is None:
+                cost = estimate_cost_usd(
+                    config.name,
+                    int(usage.get("input_tokens", 0)),
+                    int(usage.get("output_tokens", 0)),
+                )
             resp = ModelResponse(
                 text=resp.text,
                 tool_calls=resp.tool_calls,
-                usage=resp.usage or {
-                    "input_tokens": len(last_user),
-                    "output_tokens": len(resp.text or ""),
-                    "total_tokens": len(last_user) + len(resp.text or ""),
-                },
-                cost_usd=resp.cost_usd,
+                usage=usage,
+                cost_usd=cost,
                 model=config.name,
                 cache_hit=False,
             )

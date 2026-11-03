@@ -22,6 +22,7 @@ from mautonomy.agent.adapter import (
 )
 from mautonomy.agent.cache import ResponseCache
 from mautonomy.agent.config import DEFAULT_CONFIG, ModelConfig
+from mautonomy.agent.evaluate import RunResult, evaluate_scenario
 from mautonomy.agent.loop import ALLOWED_ACTIONS, Decision, INVALID, MAX_STEPS, run_agent
 from mautonomy.agent.tools import TOOL_NAMES, tool_schemas
 
@@ -38,8 +39,10 @@ __all__ = [
     "ModelResponse",
     "MuseSparkAdapter",
     "ResponseCache",
+    "RunResult",
     "TOOL_NAMES",
     "ToolCall",
+    "evaluate_scenario",
     "run_agent",
     "tool_schemas",
 ]

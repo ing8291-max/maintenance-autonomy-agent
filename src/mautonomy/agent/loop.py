@@ -55,6 +55,8 @@ class Decision:
     rep: int
     tool_calls_made: int
     reached_step_cap: bool
+    total_tokens: dict[str, int] = field(default_factory=dict)
+    total_cost_usd: float | None = None
     raw_final_text: str | None = None
 
 
@@ -63,6 +65,28 @@ class _State:
     messages: list[dict[str, Any]] = field(default_factory=list)
     format_errors: int = 0
     tool_calls_made: int = 0
+    total_input: int = 0
+    total_output: int = 0
+    cost_known: bool = True
+    total_cost: float = 0.0
+
+    def record(self, usage: dict[str, int], cost: float | None) -> None:
+        self.total_input += int(usage.get("input_tokens", 0))
+        self.total_output += int(usage.get("output_tokens", 0))
+        if cost is None:
+            self.cost_known = False
+        else:
+            self.total_cost += cost
+
+    def tokens(self) -> dict[str, int]:
+        return {
+            "input_tokens": self.total_input,
+            "output_tokens": self.total_output,
+            "total_tokens": self.total_input + self.total_output,
+        }
+
+    def cost(self) -> float | None:
+        return self.total_cost if self.cost_known else None
 
 
 _JSON_SPAN = re.compile(r"\{.*\}", re.DOTALL)
@@ -133,6 +157,8 @@ def _invalid(
         rep=rep,
         tool_calls_made=state.tool_calls_made,
         reached_step_cap=reached_cap,
+        total_tokens=state.tokens(),
+        total_cost_usd=state.cost(),
         raw_final_text=raw,
     )
 
@@ -175,6 +201,7 @@ def run_agent(
             config=config,
             rep=rep,
         )
+        state.record(resp.usage, resp.cost_usd)
 
         if resp.tool_calls and not is_last:
             state.messages.append(_tool_call_to_assistant_msg(resp.tool_calls))
@@ -207,6 +234,8 @@ def run_agent(
                 rep=rep,
                 tool_calls_made=state.tool_calls_made,
                 reached_step_cap=is_last,
+                total_tokens=state.tokens(),
+                total_cost_usd=state.cost(),
                 raw_final_text=resp.text,
             )
 
