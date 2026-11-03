@@ -6,3 +6,5 @@ __pycache__/
 skills-lock.json
 /data/*
 !/data/splits.json
+.agent-cache/
+logs/
