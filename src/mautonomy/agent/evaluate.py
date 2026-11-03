@@ -93,6 +93,7 @@ def evaluate_scenario(
     config: ModelConfig = DEFAULT_CONFIG,
     allow_eval: bool = False,
     trace_path: Path | None = None,
+    prompt_version: str = "v1",
 ) -> RunResult:
     """Run ``scenario`` once and return the A1/A2 pair as a RunResult.
 
@@ -101,7 +102,9 @@ def evaluate_scenario(
     ``logs/trace.jsonl`` (or ``trace_path`` when overridden for tests).
     """
     env = build_environment(scenario, allow_eval=allow_eval)
-    decision: Decision = run_agent(env, adapter, config=config, rep=rep)
+    decision: Decision = run_agent(
+        env, adapter, config=config, rep=rep, prompt_version=prompt_version
+    )
 
     a1_action = decision.action
     if a1_action == INVALID:

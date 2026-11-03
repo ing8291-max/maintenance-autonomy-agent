@@ -82,13 +82,22 @@ def test_tool_schemas_count_and_names():
 
 
 def test_tool_schemas_only_expose_hours_back():
+    """Per-tool maximum differs (ADR 0011 §1.3): telemetry/errors cap at
+    72 hours; maintenance_history / failure_history go out to 365 days."""
+    expected_max = {
+        "read_telemetry": 72,
+        "read_errors": 72,
+        "read_maintenance_history": 8760,
+        "read_failure_history": 8760,
+    }
     for s in tool_schemas():
         params = s["function"]["parameters"]
         props = params["properties"]
+        name = s["function"]["name"]
         assert list(props.keys()) == ["hours_back"]
         assert params["required"] == ["hours_back"]
         assert props["hours_back"]["minimum"] == 1
-        assert props["hours_back"]["maximum"] == 72
+        assert props["hours_back"]["maximum"] == expected_max[name]
 
 
 def test_tool_schemas_never_mention_scenario_coordinates():

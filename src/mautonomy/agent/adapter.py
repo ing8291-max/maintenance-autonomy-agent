@@ -54,6 +54,7 @@ class ModelAdapter(Protocol):
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
         rep: int = 0,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse: ...
 
 
@@ -138,9 +139,15 @@ class MuseSparkAdapter:
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
         rep: int = 0,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         key = self.cache.key(
-            model=config.name, messages=messages, tools=tools, config=config, rep=rep
+            model=config.name,
+            messages=messages,
+            tools=tools,
+            config=config,
+            rep=rep,
+            response_format=response_format,
         )
         cached = self.cache.get(key)
         if cached is not None:
@@ -165,6 +172,8 @@ class MuseSparkAdapter:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if response_format is not None:
+            payload["response_format"] = response_format
 
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
@@ -226,12 +235,21 @@ class FakeAdapter:
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
         rep: int = 0,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         last_user = next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
-        self.calls.append({"messages": messages, "tools": tools, "config": config, "rep": rep})
+        self.calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "config": config,
+                "rep": rep,
+                "response_format": response_format,
+            }
+        )
         if self.queue:
             resp = self.queue.pop(0)
         else:
@@ -283,6 +301,7 @@ class LlamaAdapter:
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
         rep: int = 0,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         raise NotImplementedError(
             "LlamaAdapter is a placeholder; pick a backend before enabling."

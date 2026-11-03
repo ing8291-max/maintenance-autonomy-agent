@@ -13,7 +13,7 @@ class ModelConfig:
     name: str = "muse-spark-1.1"
     temperature: float = 0.0
     reasoning_effort: str = "medium"
-    max_output_tokens: int = 1024
+    max_output_tokens: int = 4096
 
     def as_dict(self) -> dict:
         return asdict(self)

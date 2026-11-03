@@ -33,6 +33,7 @@ class ResponseCache:
         tools: list[dict[str, Any]] | None,
         config: ModelConfig,
         rep: int = 0,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         payload = {
             "model": model,
@@ -40,6 +41,7 @@ class ResponseCache:
             "tools": tools or [],
             "config": asdict(config),
             "rep": rep,
+            "response_format": response_format or None,
         }
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
         return hashlib.sha256(blob).hexdigest()

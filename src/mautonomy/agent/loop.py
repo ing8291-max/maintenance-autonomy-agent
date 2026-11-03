@@ -31,6 +31,30 @@ ALLOWED_ACTIONS: frozenset[str] = frozenset(
 INVALID = "INVALID"
 MAX_STEPS = 8
 
+# OpenAI-compatible structured-output schema; sent on the forced-final
+# turn and on retries so the model can only emit a valid decision JSON.
+DECISION_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "maintenance_decision",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": sorted(ALLOWED_ACTIONS),
+                },
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "evidence": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["action", "confidence", "evidence", "reason"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 _FINAL_INSTRUCTION = (
     "You must now reply with ONLY the final JSON object described in the "
     "system prompt. Do not call any more tools."
@@ -190,20 +214,23 @@ def run_agent(
     )
     tools = tool_schemas()
 
+    final_pending = False
     for step in range(1, max_steps + 1):
         is_last = step == max_steps
         if is_last:
             state.messages.append({"role": "user", "content": _FINAL_INSTRUCTION})
+            final_pending = True
 
         resp = adapter.complete(
             messages=state.messages,
-            tools=None if is_last else tools,
+            tools=None if final_pending else tools,
             config=config,
             rep=rep,
+            response_format=DECISION_RESPONSE_FORMAT if final_pending else None,
         )
         state.record(resp.usage, resp.cost_usd)
 
-        if resp.tool_calls and not is_last:
+        if resp.tool_calls and not final_pending:
             state.messages.append(_tool_call_to_assistant_msg(resp.tool_calls))
             for tc in resp.tool_calls:
                 state.tool_calls_made += 1
@@ -252,6 +279,10 @@ def run_agent(
             )
         state.messages.append({"role": "assistant", "content": resp.text or ""})
         state.messages.append({"role": "user", "content": _RETRY_INSTRUCTION})
+        # After the first format error, lock the model to the decision
+        # schema for the rest of the loop — tool calls are no longer
+        # allowed because the retry instruction demands a final JSON.
+        final_pending = True
 
     # Loop exits only via return; the explicit fall-through below is
     # defensive and should not be reachable.
