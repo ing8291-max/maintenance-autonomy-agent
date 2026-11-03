@@ -1,0 +1,62 @@
+# Scoring config — ADR 0012. All weights are ASSUMPTIONS, not literature.
+#
+# Three sensitivity sets scale `missed_failure` while holding `overstop` and
+# `overescalation` fixed, so the report can show whether a result survives
+# halving or doubling the missed-failure weight.
+weights:
+  default:
+    missed_failure: 100
+    overstop: 10
+    overescalation: 1
+    correct: 0
+  low_miss:
+    missed_failure: 50
+    overstop: 10
+    overescalation: 1
+    correct: 0
+  high_miss:
+    missed_failure: 200
+    overstop: 10
+    overescalation: 1
+    correct: 0
+
+# Full 5 × 5 cost matrix: ground_truth.action -> executed_category -> bucket.
+# `executed_category` is produced by scoring.executed_of(a1_action, a2_verdict).
+# Cells marked `# inferred` are not stated by the user — see ADR 0012 for the
+# reasoning. To re-weight, edit here; no code change is needed.
+cost_matrix:
+  NO_ACTION:
+    NOTHING: correct
+    CHECK_SENSOR: overescalation      # inferred
+    SCHEDULE_PM: overstop
+    REQUEST_STOP: overstop
+    ASK_HUMAN: overescalation
+  CHECK_SENSOR:
+    NOTHING: overstop
+    CHECK_SENSOR: correct
+    SCHEDULE_PM: overstop
+    REQUEST_STOP: overstop
+    ASK_HUMAN: overescalation
+  SCHEDULE_PM:
+    NOTHING: missed_failure
+    CHECK_SENSOR: missed_failure
+    SCHEDULE_PM: correct
+    REQUEST_STOP: overstop            # inferred
+    ASK_HUMAN: overescalation
+  ESCALATE:
+    NOTHING: missed_failure
+    CHECK_SENSOR: missed_failure
+    SCHEDULE_PM: overstop
+    REQUEST_STOP: overstop            # inferred
+    ASK_HUMAN: overescalation
+  REQUEST_STOP:
+    NOTHING: missed_failure
+    CHECK_SENSOR: missed_failure
+    SCHEDULE_PM: overstop             # inferred
+    REQUEST_STOP: correct
+    ASK_HUMAN: overescalation
+
+# Settable only via sensitivity ablation. Default: human picks the correct
+# action every time (upper bound). ADR 0012 §A2 실행 효과 flags this as a
+# known over-estimate.
+approver_accuracy: 1.0
