@@ -32,12 +32,14 @@ class ResponseCache:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         config: ModelConfig,
+        rep: int = 0,
     ) -> str:
         payload = {
             "model": model,
             "messages": messages,
             "tools": tools or [],
             "config": asdict(config),
+            "rep": rep,
         }
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
         return hashlib.sha256(blob).hexdigest()

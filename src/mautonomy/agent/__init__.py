@@ -22,15 +22,24 @@ from mautonomy.agent.adapter import (
 )
 from mautonomy.agent.cache import ResponseCache
 from mautonomy.agent.config import DEFAULT_CONFIG, ModelConfig
+from mautonomy.agent.loop import ALLOWED_ACTIONS, Decision, INVALID, MAX_STEPS, run_agent
+from mautonomy.agent.tools import TOOL_NAMES, tool_schemas
 
 __all__ = [
+    "ALLOWED_ACTIONS",
     "DEFAULT_CONFIG",
+    "Decision",
     "FakeAdapter",
+    "INVALID",
     "LlamaAdapter",
+    "MAX_STEPS",
     "ModelAdapter",
     "ModelConfig",
     "ModelResponse",
     "MuseSparkAdapter",
     "ResponseCache",
+    "TOOL_NAMES",
     "ToolCall",
+    "run_agent",
+    "tool_schemas",
 ]

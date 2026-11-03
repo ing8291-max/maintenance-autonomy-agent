@@ -53,6 +53,7 @@ class ModelAdapter(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
+        rep: int = 0,
     ) -> ModelResponse: ...
 
 
@@ -136,9 +137,10 @@ class MuseSparkAdapter:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
+        rep: int = 0,
     ) -> ModelResponse:
         key = self.cache.key(
-            model=config.name, messages=messages, tools=tools, config=config
+            model=config.name, messages=messages, tools=tools, config=config, rep=rep
         )
         cached = self.cache.get(key)
         if cached is not None:
@@ -208,11 +210,13 @@ class FakeAdapter:
         *,
         scripted: dict[str, ModelResponse] | None = None,
         default: ModelResponse | None = None,
+        queue: list[ModelResponse] | None = None,
     ) -> None:
         self.scripted = scripted or {}
         self.default = default or ModelResponse(
             text="ok", usage={"input_tokens": 0, "output_tokens": 1, "total_tokens": 1}
         )
+        self.queue = list(queue) if queue else []
         self.calls: list[dict[str, Any]] = []
 
     def complete(
@@ -221,13 +225,17 @@ class FakeAdapter:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
+        rep: int = 0,
     ) -> ModelResponse:
         last_user = next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
-        self.calls.append({"messages": messages, "tools": tools, "config": config})
-        resp = self.scripted.get(last_user, self.default)
+        self.calls.append({"messages": messages, "tools": tools, "config": config, "rep": rep})
+        if self.queue:
+            resp = self.queue.pop(0)
+        else:
+            resp = self.scripted.get(last_user, self.default)
         if resp.model == "":
             resp = ModelResponse(
                 text=resp.text,
@@ -266,6 +274,7 @@ class LlamaAdapter:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         config: ModelConfig = DEFAULT_CONFIG,
+        rep: int = 0,
     ) -> ModelResponse:
         raise NotImplementedError(
             "LlamaAdapter is a placeholder; pick a backend before enabling."
