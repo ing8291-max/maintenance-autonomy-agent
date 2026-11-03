@@ -83,6 +83,11 @@ def _load_dev_machines() -> list[int]:
     return sorted(splits["dev"])
 
 
+def _load_eval_machines() -> list[int]:
+    splits = json.loads(_SPLITS_JSON.read_text())
+    return sorted(splits["eval"])
+
+
 def _load_telemetry(machine_id: int) -> list[tuple[datetime, float]]:
     result = []
     with (_RAW / "PdM_telemetry.csv").open() as f:
@@ -289,6 +294,288 @@ def generate_easy_scenarios(seed: int = 42) -> list[Scenario]:
         scenarios.extend(f2)
 
     return scenarios
+
+
+# ADR 0013 — eval composition (pre-registered)
+_EVAL_NORMAL_CAP = 14
+_EVAL_PRE48_CAP = 13
+_EVAL_PRE24_CAP = 13
+_EVAL_F2_PAIR_CAP = 20
+
+
+def generate_eval_scenarios(seed: int = 42) -> list[Scenario]:
+    """Generate the pre-registered eval scenarios on eval-split machines.
+
+    Composition is fixed by ADR 0013: 14 normal + 13 pre_failure_24_48h +
+    13 pre_failure_0_24h + 20 F2 pairs (= 40 scenarios) = 80 total. Each
+    eval machine contributes at most one scenario per type; machine order
+    is the same seed-shuffled list used elsewhere in this module. Determinism
+    is per (seed, splits.json).
+    """
+    rng = random.Random(seed)
+    eval_machines = _load_eval_machines()
+    machines_shuffled = sorted(eval_machines)
+    rng.shuffle(machines_shuffled)
+
+    data_start = datetime(2015, 1, 1)
+    data_end = datetime(2016, 1, 1)
+
+    scenarios: list[Scenario] = []
+
+    # --- Normal (cap 14) ---
+    normal_rng = random.Random(seed)  # mirrors _normal_as_of consumption order
+    normal_count = 0
+    for mid in machines_shuffled:
+        if normal_count >= _EVAL_NORMAL_CAP:
+            break
+        failures = _load_failures(mid)
+        as_of = _normal_as_of(mid, failures, normal_rng, data_start, data_end)
+        if as_of is None:
+            continue
+        scenarios.append(Scenario(
+            schema_version="1.0",
+            scenario_id=f"eval-easy-normal-{seed:04d}-{mid:04d}",
+            scenario_type="normal",
+            machine_id=mid,
+            split="eval",
+            as_of=as_of,
+            seed=seed,
+            ground_truth=GroundTruth(
+                action="NO_ACTION",
+                rationale="No anomaly signals present in the observation window",
+            ),
+            failure_datetime=None,
+            failure_component=None,
+            timestamps=None,
+            perturbation=None,
+            pair_id=None,
+            pair_role=None,
+        ))
+        normal_count += 1
+
+    # --- pre_48h and pre_24h (caps 13 / 13) ---
+    pre48_count = 0
+    pre24_count = 0
+    for mid in machines_shuffled:
+        if pre48_count >= _EVAL_PRE48_CAP and pre24_count >= _EVAL_PRE24_CAP:
+            break
+        failures = _load_failures(mid)
+        if not failures:
+            continue
+        telemetry = _load_telemetry(mid)
+        picked48 = False
+        picked24 = False
+        for failure_dt, failure_comp in failures:
+            if picked48 and picked24:
+                break
+            ts = _infer_timestamps(telemetry, failure_dt)
+            if ts is None:
+                continue
+            if not picked48 and pre48_count < _EVAL_PRE48_CAP:
+                as_of_36h = failure_dt - timedelta(hours=36)
+                if as_of_36h > ts.anomaly_onset:
+                    scenarios.append(Scenario(
+                        schema_version="1.0",
+                        scenario_id=f"eval-easy-pre48h-{seed:04d}-{mid:04d}",
+                        scenario_type="pre_failure_24_48h",
+                        machine_id=mid,
+                        split="eval",
+                        as_of=as_of_36h,
+                        seed=seed,
+                        ground_truth=GroundTruth(
+                            action="SCHEDULE_PM",
+                            rationale=(
+                                f"Vibration drift detected; failure of {failure_comp} "
+                                f"expected within 48h"
+                            ),
+                        ),
+                        failure_datetime=failure_dt,
+                        failure_component=failure_comp,
+                        timestamps=ts,
+                        perturbation=None,
+                        pair_id=None,
+                        pair_role=None,
+                    ))
+                    pre48_count += 1
+                    picked48 = True
+            if not picked24 and pre24_count < _EVAL_PRE24_CAP:
+                as_of_12h = failure_dt - timedelta(hours=12)
+                if as_of_12h >= ts.anomaly_onset:
+                    scenarios.append(Scenario(
+                        schema_version="1.0",
+                        scenario_id=f"eval-easy-pre24h-{seed:04d}-{mid:04d}",
+                        scenario_type="pre_failure_0_24h",
+                        machine_id=mid,
+                        split="eval",
+                        as_of=as_of_12h,
+                        seed=seed,
+                        ground_truth=GroundTruth(
+                            action="ESCALATE",
+                            rationale=(
+                                f"Imminent failure of {failure_comp}; "
+                                "vibration at critical level, escalate immediately"
+                            ),
+                        ),
+                        failure_datetime=failure_dt,
+                        failure_component=failure_comp,
+                        timestamps=ts,
+                        perturbation=None,
+                        pair_id=None,
+                        pair_role=None,
+                    ))
+                    pre24_count += 1
+                    picked24 = True
+
+    # --- F2 pairs (cap 20 pairs = 40 scenarios) ---
+    f2_rng = random.Random(seed + 1)  # distinct stream from normal_rng
+    f2_pairs_count = 0
+    for mid in machines_shuffled:
+        if f2_pairs_count >= _EVAL_F2_PAIR_CAP:
+            break
+        pair = _pick_f2_pair_for_machine(mid, f2_rng, seed)
+        if pair is None:
+            continue
+        # Re-tag ids with the eval prefix
+        pair = [_retag_eval_f2(sc) for sc in pair]
+        scenarios.extend(pair)
+        f2_pairs_count += 1
+
+    return scenarios
+
+
+def _pick_f2_pair_for_machine(
+    mid: int,
+    rng: random.Random,
+    seed: int,
+) -> Optional[list[Scenario]]:
+    """F2 act/abstain pair bound to a specific machine (eval generator helper).
+
+    Mirrors _pick_f2_pair but takes mid explicitly instead of searching the
+    machine list, so the eval generator can enumerate eval machines directly.
+    """
+    failures = _load_failures(mid)
+    telemetry = _load_telemetry_full(mid)
+    if not telemetry:
+        return None
+    times = [r["datetime"] for r in telemetry]
+    as_of = _normal_window_as_of(times, failures, rng)
+    if as_of is None:
+        return None
+
+    vib_mean, vib_std = _sensor_stats(telemetry, "vibration", as_of)
+    rot_mean, rot_std = _sensor_stats(telemetry, "rotate", as_of)
+    if vib_std <= 0 or rot_std <= 0:
+        return None
+
+    pair_id = f"f2-pair-{seed:04d}-{mid:04d}"
+    start_at_offset = rng.randint(
+        _F2_START_AT_OFFSET_MIN_HOURS, _F2_START_AT_OFFSET_MAX_HOURS
+    )
+    precursor_start = as_of - timedelta(hours=start_at_offset)
+    min_lead = max(
+        _F2_PRECURSOR_LEAD_MIN_HOURS,
+        start_at_offset + _F2_MIN_IMPLIED_FAILURE_GAP_HOURS,
+    )
+    lead_hours = rng.randint(min_lead, _F2_PRECURSOR_LEAD_MAX_HOURS)
+    implied_failure = precursor_start + timedelta(hours=lead_hours)
+    rise_rate = round(_F2_PRECURSOR_RISE_SD * vib_std / lead_hours, 4)
+    total_rise_at_as_of_sd = round(
+        _F2_PRECURSOR_RISE_SD * start_at_offset / lead_hours, 3
+    )
+    correlated_delta = round(_F2_CORRELATED_DELTA_SD * rot_std, 2)
+    point_of_no_return = implied_failure - timedelta(
+        hours=_F2_PONR_HOURS_BEFORE_FAILURE
+    )
+
+    act = Scenario(
+        schema_version="1.0",
+        scenario_id=f"dev-f2-act-{seed:04d}-{mid:04d}",
+        scenario_type="hardcase",
+        machine_id=mid,
+        split="dev",
+        as_of=as_of,
+        seed=seed,
+        ground_truth=GroundTruth(
+            action="SCHEDULE_PM",
+            rationale=(
+                f"Vibration drifting +{total_rise_at_as_of_sd:.2f}σ since "
+                f"{start_at_offset}h ago with correlated rotate decline; "
+                f"implied failure ~{lead_hours - start_at_offset}h away — "
+                "schedule PM"
+            ),
+        ),
+        failure_datetime=None,
+        failure_component=None,
+        timestamps=Timestamps(
+            anomaly_onset=precursor_start,
+            first_observable=precursor_start,
+            point_of_no_return=point_of_no_return,
+        ),
+        perturbation=Perturbation(
+            family="F2",
+            kind="precursor_rise",
+            sensor="vibration",
+            start_at=precursor_start,
+            description=(
+                f"vibration rises {rise_rate:.4f}/h for {lead_hours}h to "
+                f"+{_F2_PRECURSOR_RISE_SD:.1f}σ at implied failure; by as_of "
+                f"({start_at_offset}h in) the signal has moved "
+                f"+{total_rise_at_as_of_sd:.2f}σ. rotate drifts "
+                f"{correlated_delta:.2f} over the same [start_at, "
+                "implied_failure] window"
+            ),
+            rise_rate_per_hour=rise_rate,
+            rise_duration_hours=lead_hours,
+            correlated_sensor="rotate",
+            correlated_delta=correlated_delta,
+            implied_failure=implied_failure,
+        ),
+        pair_id=pair_id,
+        pair_role="act",
+    )
+
+    stuck_start = as_of - timedelta(hours=_F2_STUCK_LEAD_HOURS)
+    abstain = Scenario(
+        schema_version="1.0",
+        scenario_id=f"dev-f2-abstain-{seed:04d}-{mid:04d}",
+        scenario_type="hardcase",
+        machine_id=mid,
+        split="dev",
+        as_of=as_of,
+        seed=seed,
+        ground_truth=GroundTruth(
+            action="CHECK_SENSOR",
+            rationale=(
+                f"Vibration sensor frozen since "
+                f"{stuck_start.strftime(_DT_FMT)} while rotate/pressure "
+                "stay nominal — verify sensor before scheduling PM"
+            ),
+        ),
+        failure_datetime=None,
+        failure_component=None,
+        timestamps=None,
+        perturbation=Perturbation(
+            family="F2",
+            kind="sensor_stuck",
+            sensor="vibration",
+            start_at=stuck_start,
+            description=(
+                f"vibration sensor stuck at baseline mean "
+                f"({vib_mean:.2f}); other signals unchanged"
+            ),
+            stuck_at=round(vib_mean, 2),
+        ),
+        pair_id=pair_id,
+        pair_role="abstain",
+    )
+    return [act, abstain]
+
+
+def _retag_eval_f2(sc: Scenario) -> Scenario:
+    """Rewrite an F2 pair member built on an eval machine to carry eval ids."""
+    new_id = sc.scenario_id.replace("dev-f2-", "eval-f2-", 1)
+    from dataclasses import replace
+    return replace(sc, scenario_id=new_id, split="eval")
 
 
 def _pick_normal_machine(
