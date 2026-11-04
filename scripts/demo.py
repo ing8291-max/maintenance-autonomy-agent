@@ -7,7 +7,7 @@ Picks an F2 pair where the agent correctly identified the stuck-sensor
 sensor parquet files already on disk.
 
 Usage:
-    python scripts/demo.py [PAIR_NUM]
+    python3 scripts/demo.py [PAIR_NUM]
 
 PAIR_NUM defaults to 0025.  Any eval F2 pair number works, e.g. 0041.
 """

@@ -2,7 +2,7 @@
 
 **A test harness — not just an agent — that measures how safely an LLM can decide when to act, when to ask, and when to do nothing on predictive maintenance signals.**
 
-Across 80 pre-registered evaluation problems, A2 (LLM + read tools + policy gate) achieves 52.5% accuracy and reduces weighted cost to 37.95 per problem (95% CI [31.99, 44.23]) versus a cost-optimal always-escalate baseline of 1.00.  The gate trims 0.78 cost units off the ungated agent (A1 → A2, 95% CI [−1.24, −0.35]).
+The bottleneck for AI in industry is not capability but verification. Accuracy alone would have said deploy: the agent had the highest accuracy (52.5%). Verification showed the highest expected cost (A2 37.95 per problem vs 1.00 for always-escalate), because its errors are missed failures. The gate cut cost by only 0.78 (95% CI [−1.24, −0.35]): guardrails stop wrong actions, not wrong inaction.
 
 ---
 
@@ -88,13 +88,13 @@ Pre-registered counts (ADR 0013 §3.2):
 | Normal (no fault ±30 d) | 14 | NO_ACTION |
 | Pre-failure 24–48 h | 13 | SCHEDULE_PM |
 | Pre-failure 0–24 h | 13 | ESCALATE |
-| F2-act (sensor-missing, act) | 20 | SCHEDULE_PM |
-| F2-abstain (sensor-missing, abstain) | 20 | CHECK_SENSOR |
+| F2-act (precursor-rise, act) | 20 | SCHEDULE_PM |
+| F2-abstain (sensor-stuck, abstain) | 20 | CHECK_SENSOR |
 | **Total** | **80** | — |
 
 ### F2 hard-case family
 
-F2 (missing-sensor) scenarios come in matched pairs: one machine where the sensor gap coincides with an approaching fault (act) and one where it does not (abstain).  The harness synthesises both by injecting a controlled perturbation into real Azure telemetry intervals, keeping the base signal authentic (ADR 0003).  Bootstrap CI samples the act/abstain pair as a single unit to preserve within-pair correlation.
+F2 scenarios come in matched pairs synthesised from the same machine and the same normal window.  In the act scenario a precursor is injected: vibration rises slowly and rotate falls together, calibrated to the median of 485 dev-set failures; the correct response is SCHEDULE_PM.  In the abstain scenario the vibration sensor is frozen at its baseline mean from 18 h before as_of; the correct response is CHECK_SENSOR.  The harness synthesises both by injecting controlled perturbations into real Azure telemetry intervals, keeping the base signal authentic (ADR 0003).  Bootstrap CI samples the act/abstain pair as a single unit to preserve within-pair correlation.
 
 ### Baselines
 
@@ -105,7 +105,7 @@ F2 (missing-sensor) scenarios come in matched pairs: one machine where the senso
 | B3 | Logistic regression on sensor features, threshold τ=0.186 (Youden's J on dev set) |
 | B4 | Rule-based: sensor threshold lookup table |
 
-Baselines are deterministic and run once.  A1/A2 run 5 times per problem (different random seeds) to quantify sampling variance.
+Baselines are deterministic and run once.  A1/A2 run 5 times per problem (5 repeats at temperature 0; 92.5% fully consistent) to quantify sampling variance.
 
 ### Cost weights
 
@@ -148,7 +148,7 @@ Ask-F1 detail (A1): precision=0.200, recall=0.015, F1=0.029.
 | f2-act | 20 | 15.0% | 17/20 (85%) | 17 | 0 | 3 |
 | f2-abstain | 20 | 100.0% | — | 0 | 20 | 0 |
 
-The agent handles normal and abstain cases perfectly.  Its failure mode on failure-warning and hard cases is predominantly **NO_ACTION** — it mistakes sensor-gap signals for silence.
+The agent handles normal and abstain cases perfectly.  Its failure mode on failure-warning and hard cases is predominantly **NO_ACTION** — it reads weak injected degradation (about 0.75σ at observation time) as normal.
 
 ### Gate effect
 
@@ -210,7 +210,7 @@ The policy gate catches cases where the agent proposes an *over-aggressive* acti
 ### What you can rely on
 
 - The gate consistently reduces cost (Δ=−0.78, CI excludes zero at 95%) regardless of how heavily you weight missed faults versus overstopping.
-- The agent correctly handles fully normal machines (100%) and sensor-gap abstain cases (100%), suggesting the basic telemetry-reading pipeline is sound.
+- The agent correctly handles fully normal machines (100%) and sensor-stuck abstain cases (100%), suggesting the basic telemetry-reading pipeline is sound.
 - AUROC on the action-needed criterion (0.899) indicates the agent's confidence score is genuinely informative about whether *something* needs to happen.
 
 ### What you cannot rely on
@@ -264,17 +264,26 @@ Place the five CSV files (`PdM_telemetry.csv`, `PdM_errors.csv`, `PdM_maint.csv`
 
 ```bash
 cp .env.example .env
-# edit .env: set MUSE_API_KEY (or equivalent) for the LLM adapter
+# edit .env: set META_API_KEY to your LLM API key
 ```
 
 **3. Install**
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
-**4. Run the full evaluation**
+**4. Fit the baselines**
+
+`data/models/` is not committed.  Run this once before `make eval`:
+
+```bash
+make baselines
+```
+
+This writes `data/models/b3_lr.json` and `data/models/b4_thresholds.json` from the dev-split machines.
+
+**5. Run the full evaluation**
 
 ```bash
 make eval
@@ -284,6 +293,7 @@ This calls `scripts/run_eval.py` and then `scripts/score_eval.py`, writing logs 
 
 ```bash
 git checkout eval-freeze-v1
+make baselines
 make eval
 ```
 
@@ -301,14 +311,14 @@ All references below are arXiv preprints and have not been peer-reviewed.  They 
 | **AgentAbstain** (arXiv 2607.10059) | Source of the paired-accuracy metric. |
 | **HiL-Bench** (arXiv 2604.09408) | Source of the Ask-F1 metric. |
 | **Failure-as-a-Process** (arXiv 2607.09510) | Inspiration for the three-timestamp ground truth (anomaly onset → first visible → point of no return) (ADR 0006). |
-| **AutoHarness** (arXiv 2603.03329) | Format-quality indicators should be reported separately from main results (ADR 0011 §1.1). |
-| **Agents Can't See More Than You Do** (arXiv 2603.26993) | Multi-agent with shared inputs does not improve decision quality (ADR 0011 §3). |
-| **Adapting the Interface Not the Model** (arXiv 2605.22166) | Interface design resolves most harness–model gaps; tuning the model/prompt distorts evaluation distributions (ADR 0011 §1.3). |
-| **Metacognition** (arXiv 2607.11881) | Reproducibility of confidence-based decisions requires fixed threshold + AUROC reporting (ADR 0011 §2.2). |
-| **Harness Evolution Rethought** (arXiv 2607.12227) | Step budget and repeat count are the main confounds in harness comparisons (ADR 0011 §1.2). |
-| **Model or Harness** (arXiv 2607.28802) | Post-hoc failure classification causes reproducibility failures; pre-register the taxonomy (ADR 0011 §2.1). |
-| **Inside an Agent Team** (arXiv 2608.16801) | Unrestricted tools (file/shell) open data-leakage paths that undermine evaluation integrity (ADR 0011 §1.4). |
-| **JEV-as-a-Judge** (arXiv 2609.26550) | Pre-registered thresholds plus AUROC reporting stabilise conclusions (ADR 0011 §2.2). |
+| **AutoHarness** (arXiv 2603.03329) | A code constraint layer that blocks illegal actions lets smaller models outperform larger ones; format quality should be reported separately from main results (ADR 0011 §1.1). |
+| **On the Reliability Limits of LLM-Based Multi-Agent Planning** (arXiv 2603.26993) | Multi-agent with shared inputs does not improve decision quality (ADR 0011 §3). |
+| **Adapting the Interface Not the Model** (arXiv 2605.22166) | A significant fraction of failures are model–environment interface mismatches that harness modifications fix; tuning the model/prompt distorts evaluation distributions (ADR 0011 §1.3). |
+| **Metacognition** (arXiv 2607.11881) | Treats confidence calibration, self-verification, and knowing when to stop as a unified capability; survey of methods across all three (ADR 0011 §2.2). |
+| **Harness Evolution Rethought** (arXiv 2607.12227) | Harness improvements should be compared against a simple search baseline at the same compute budget; step budget and repeat count are the main confounds (ADR 0011 §1.2). |
+| **Model or Harness** (arXiv 2607.28802) | Proposes a taxonomy that attributes failures to model, harness, tools, or environment; pre-register the taxonomy before evaluation (ADR 0011 §2.1). |
+| **Inside an Agent Team** (arXiv 2608.16801) | Designating a coordinator did not reliably improve success rate; agents proactively retrieved grading materials (ADR 0011 §1.4). |
+| **JEV-as-a-Judge** (arXiv 2609.26550) | Errors cluster at low confidence, making confidence-based delegation effective; the delegation threshold should be calibrated on the agent's own data (ADR 0011 §2.2). |
 
 ---
 

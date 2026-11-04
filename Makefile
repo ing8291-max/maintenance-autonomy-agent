@@ -1,4 +1,4 @@
-.PHONY: install test splits baselines
+.PHONY: install test splits baselines eval
 
 install:
 	uv pip install -e ".[dev]"
@@ -15,3 +15,7 @@ splits:
 baselines:
 	uv run python -m mautonomy.baselines.b4_sensor_rule --fit
 	uv run python -m mautonomy.baselines.b3_logistic --fit
+
+eval:
+	uv run python scripts/run_eval.py
+	uv run python scripts/score_eval.py
